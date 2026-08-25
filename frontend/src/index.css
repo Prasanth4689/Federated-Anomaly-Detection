@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+@theme {
+  --color-soc-bg: #0a0e17;
+  --color-soc-panel: #111827;
+  --color-soc-border: #1f2937;
+  --color-soc-accent: #00f0ff;
+  --color-soc-success: #10b981;
+  --color-soc-warning: #f59e0b;
+  --color-soc-danger: #ef4444;
+  --color-soc-text: #e2e8f0;
+  --color-soc-muted: #94a3b8;
+}
+
+body {
+  background-color: var(--color-soc-bg);
+  color: var(--color-soc-text);
+  font-family: 'Inter', system-ui, sans-serif;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* Custom scrollbar for a sleek look */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-soc-bg);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-soc-border);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-soc-muted);
+}
+
+/* Hide ReactFlow attribution */
+.react-flow__attribution {
+  display: none !important;
+}
+
+/* Smooth node transitions */
+.react-flow__node {
+  transition: filter 0.3s ease;
+}
