@@ -29,6 +29,8 @@ const statusColor: Record<string, string> = {
   QUARANTINED:   'text-gray-400',
 };
 
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080';
+
 export default function NodeDetailPanel({ node, onClose, packets, flows, currentRound }: NodeDetailPanelProps) {
   if (!node) return null;
 
@@ -62,7 +64,7 @@ export default function NodeDetailPanel({ node, onClose, packets, flows, current
 
   const handleRestore = () => {
     setRestoring(true);
-    fetch(`http://localhost:8080/api/nodes/${node.id}/recover`, { method: 'PUT' })
+    fetch(`${API_URL}/api/nodes/${node.id}/recover`, { method: 'PUT' })
       .catch(console.error)
       .finally(() => setTimeout(() => setRestoring(false), 2000));
   };

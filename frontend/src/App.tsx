@@ -7,6 +7,8 @@ import CustomNode from './components/topology/CustomNode';
 import AnimatedEdge from './components/topology/AnimatedEdge';
 import NodeDetailPanel from './components/topology/NodeDetailPanel';
 
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080';
+
 const nodeTypes = { custom: CustomNode };
 const edgeTypes = { animated: AnimatedEdge };
 
@@ -56,7 +58,7 @@ function App() {
 
   // ── Bootstrap ──────────────────────────────────────────────────────────────
   useEffect(() => {
-    fetch('http://localhost:8080/api/nodes')
+    fetch(`${API_URL}/api/nodes`)
       .then(r => r.json())
       .then((data: any[]) => setNodes(data.map(formatNode)))
       .catch(console.error);
@@ -64,7 +66,7 @@ function App() {
 
   useEffect(() => {
     const iv = setInterval(() => {
-      fetch('http://localhost:8080/api/attacks/active')
+      fetch(`${API_URL}/api/attacks/active`)
         .then(r => r.json())
         .then(setActiveAttacks)
         .catch(() => {});
@@ -93,14 +95,14 @@ function App() {
 
   // ── Controls ───────────────────────────────────────────────────────────────
   const simControl = useCallback((action: string) => {
-    fetch(`http://localhost:8080/api/simulation/${action}`, { method: 'POST' })
+    fetch(`${API_URL}/api/simulation/${action}`, { method: 'POST' })
       .then(r => r.json())
       .then(d => { setSimState(d.state); setSimSpeed(d.speed); })
       .catch(console.error);
   }, []);
 
   const setSpeed = useCallback((s: number) => {
-    fetch(`http://localhost:8080/api/simulation/speed?multiplier=${s}`, { method: 'POST' })
+    fetch(`${API_URL}/api/simulation/speed?multiplier=${s}`, { method: 'POST' })
       .then(r => r.json())
       .then(d => { setSimState(d.state); setSimSpeed(d.speed); })
       .catch(console.error);
@@ -110,8 +112,8 @@ function App() {
     if (!targetNode) return;
     const isActive = !!activeAttacks[targetNode];
     const url = isActive
-      ? `http://localhost:8080/api/attacks/stop?target=${targetNode}`
-      : `http://localhost:8080/api/attacks/inject?type=${attackType}&target=${targetNode}`;
+      ? `${API_URL}/api/attacks/stop?target=${targetNode}`
+      : `${API_URL}/api/attacks/inject?type=${attackType}&target=${targetNode}`;
     fetch(url, { method: 'POST' })
       .then(() => {
         setActiveAttacks(prev => {
@@ -124,7 +126,7 @@ function App() {
   }, [targetNode, attackType, activeAttacks]);
 
   const restoreAll = useCallback(() => {
-    fetch('http://localhost:8080/api/nodes/recoverAll', { method: 'PUT' }).catch(console.error);
+    fetch(`${API_URL}/api/nodes/recoverAll`, { method: 'PUT' }).catch(console.error);
   }, []);
 
   // ── Derived data ───────────────────────────────────────────────────────────
@@ -375,7 +377,7 @@ function App() {
                 <Clock size={14} /> Event Log
               </h3>
               <button
-                onClick={() => window.open('http://localhost:8080/api/flows/export', '_blank')}
+                onClick={() => window.open(`${API_URL}/api/flows/export`, '_blank')}
                 className="text-[10px] px-2 py-1 rounded bg-soc-bg border border-soc-border hover:text-cyan-400 hover:border-cyan-400 transition-colors text-soc-muted"
               >
                 EXPORT CSV

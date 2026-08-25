@@ -33,6 +33,8 @@ export interface SimulationEvent {
   timestamp?: string;
 }
 
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080';
+
 export function useWebSocket() {
   const [packets, setPackets] = useState<Packet[]>([]);
   const [flows, setFlows] = useState<NetworkFlow[]>([]);
@@ -42,7 +44,8 @@ export function useWebSocket() {
   const clientRef = useRef<Client | null>(null);
 
   useEffect(() => {
-    const socket = new SockJS('http://localhost:8080/ws');
+    // 1. Establish SockJS connection
+    const socket = new SockJS(`${API_URL}/ws`);
     const client = new Client({
       webSocketFactory: () => socket,
       reconnectDelay: 5000,

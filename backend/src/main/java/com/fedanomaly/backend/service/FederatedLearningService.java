@@ -16,7 +16,9 @@ public class FederatedLearningService {
     private final NetworkNodeRepository nodeRepository;
     private final SimpMessagingTemplate messagingTemplate;
     private final RestTemplate restTemplate;
-    private final String ML_SERVICE_URL = "http://localhost:5000";
+    
+    @org.springframework.beans.factory.annotation.Value("${ML_SERVICE_URL:http://localhost:5000}")
+    private String ML_SERVICE_URL;
 
     public FederatedLearningService(NetworkFlowRepository flowRepository, 
                                   NetworkNodeRepository nodeRepository,
