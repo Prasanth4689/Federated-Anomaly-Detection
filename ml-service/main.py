@@ -12,6 +12,14 @@ from utils.feature_engineering import extract_features
 
 app = FastAPI(title="ML Service")
 
+@app.get("/")
+def home():
+    return {"status": "ML service is running"}
+
+@app.get("/health")
+def health():
+    return {"status": "healthy"}
+
 # State
 local_models: Dict[str, AnomalyDetector] = {}
 aggregator = FedAvgAggregator()
