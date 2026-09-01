@@ -1,19 +1,21 @@
 server:
-  port: 8080
+  port: ${PORT:8080}
 
 spring:
   application:
     name: fed-anomaly-soc
-  # H2 embedded database for development
+
   datasource:
     url: jdbc:h2:file:./data/fedanomaly;AUTO_SERVER=TRUE
     driver-class-name: org.h2.Driver
     username: sa
     password:
+
   h2:
     console:
       enabled: true
       path: /h2-console
+
   jpa:
     hibernate:
       ddl-auto: update
@@ -23,12 +25,10 @@ spring:
         format_sql: true
         dialect: org.hibernate.dialect.H2Dialect
 
-# CORS
 app:
   cors:
     allowed-origins: http://localhost:5173,http://localhost:3000
 
-# Logging
 logging:
   level:
     com.fedanomaly: DEBUG
