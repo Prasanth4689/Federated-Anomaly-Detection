@@ -161,36 +161,31 @@ export default function App() {
   const activeCount = nodes.length - quarantinedCount;
 
   // ── High-Performance Aggregated Flow Routing ────────────────────────────────
-  const getPathToCore = (nodeId: string): string => {
-    if (nodeId === 'inet-gw') return 'fw-1';
-    if (nodeId.startsWith('iot-') && nodeId !== 'iot-gw') return 'iot-gw';
-    return 'core-sw'; 
-  };
-
   const getPathSegments = (src: string, dst: string): string[] => {
-    const segments: string[] = [];
-    const srcHop = getPathToCore(src);
-    const dstHop = getPathToCore(dst);
+    // Treat external attackers as coming from the internet gateway
+    if (src.startsWith('ext-') || src === 'EXTERNAL') src = 'inet-gw';
+    if (dst.startsWith('ext-') || dst === 'EXTERNAL') dst = 'inet-gw';
+    if (src === dst) return [];
     
-    // Hop 1: Source to its local switch
-    if (srcHop !== dst) {
-      segments.push(`${src}-${srcHop}`);
-      segments.push(`${srcHop}-${src}`); // bi-directional matching just in case
-      // Hop 2: Core to Dest local switch
-      if (srcHop === 'core-sw') {
-         if (dstHop !== 'core-sw' && dstHop !== dst) {
-           segments.push(`core-sw-${dstHop}`);
-           segments.push(`${dstHop}-core-sw`);
-           segments.push(`${dstHop}-${dst}`);
-           segments.push(`${dst}-${dstHop}`);
-         } else {
-           segments.push(`core-sw-${dst}`);
-           segments.push(`${dst}-core-sw`);
-         }
-      }
-    } else {
-      segments.push(`${src}-${dst}`);
-      segments.push(`${dst}-${src}`);
+    const getPathToCoreList = (node: string): string[] => {
+        if (node === 'core-sw') return ['core-sw'];
+        if (node === 'fw-1') return ['fw-1', 'core-sw'];
+        if (node === 'inet-gw') return ['inet-gw', 'fw-1', 'core-sw'];
+        if (node.startsWith('iot-') && node !== 'iot-gw') return [node, 'iot-gw', 'core-sw'];
+        return [node, 'core-sw']; 
+    };
+    
+    const srcPath = getPathToCoreList(src);
+    const dstPath = getPathToCoreList(dst);
+    
+    const segments: string[] = [];
+    for (let i = 0; i < srcPath.length - 1; i++) {
+        segments.push(`${srcPath[i]}-${srcPath[i+1]}`);
+        segments.push(`${srcPath[i+1]}-${srcPath[i]}`);
+    }
+    for (let i = 0; i < dstPath.length - 1; i++) {
+        segments.push(`${dstPath[i]}-${dstPath[i+1]}`);
+        segments.push(`${dstPath[i+1]}-${dstPath[i]}`);
     }
     return segments;
   };
