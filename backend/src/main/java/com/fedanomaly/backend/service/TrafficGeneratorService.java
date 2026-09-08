@@ -21,6 +21,11 @@ public class TrafficGeneratorService {
     private static final int[] IOT_PORTS = {1883, 8883, 5683}; // MQTT, CoAP
     private static final String[] PROTOCOLS = {"TCP", "UDP", "HTTP", "HTTPS", "DNS"};
 
+    // External-profile node IDs that can act as attack sources
+    private static final String[] EXTERNAL_SOURCES = {"inet-gw", "vpn-gw"};
+    // Internal PCs that could be compromised
+    private static final String[] INTERNAL_PCS = {"dev-pc", "emp-pc-1", "emp-pc-2", "admin-pc"};
+
     public TrafficGeneratorService(NetworkNodeRepository nodeRepository, FlowService flowService, AttackService attackService) {
         this.nodeRepository = nodeRepository;
         this.flowService = flowService;
@@ -50,7 +55,7 @@ public class TrafficGeneratorService {
             flowService.receivePacket(p);
         }
 
-        // Generate attack traffic
+        // Generate attack traffic — ALL packets use label "NORMAL" so ML must detect from features
         attackService.getActiveAttacks().forEach((target, type) -> {
             String normalised = type.toUpperCase();
             if (normalised.startsWith("DDOS")) {
@@ -70,26 +75,31 @@ public class TrafficGeneratorService {
     }
 
     // --- Attack Traffic Generators ---
+    // Key change: label is always "NORMAL" — detection comes from ML observing
+    // anomalous traffic FEATURES (volume, packet size, port diversity, rate)
 
     private void generateDDoS(List<NetworkNode> nodes, String target) {
-        // DDoS originates from the internet gateway (simulating external botnet)
-        NetworkNode src = nodes.stream().filter(n -> n.getId().equals("inet-gw")).findFirst().orElse(nodes.get(0));
+        // DDoS: high-volume small packets from multiple external sources
+        // Feature signature: very high packets_per_sec, very low avg_packet_size, low port_diversity
         for (int i = 0; i < 50; i++) {
             Packet p = new Packet();
-            p.setSource(src.getId());
+            // Rotate among external sources to simulate botnet
+            p.setSource(EXTERNAL_SOURCES[random.nextInt(EXTERNAL_SOURCES.length)]);
             p.setDest(target);
             p.setProtocol(random.nextBoolean() ? "TCP" : "UDP");
             p.setSourcePort(1024 + random.nextInt(60000));
-            p.setDestPort(80);
-            p.setBytes(64); // small packets, high volume
-            p.setLabel("ATTACK");
+            p.setDestPort(80); // All targeting same port — low diversity
+            p.setBytes(32 + random.nextInt(32)); // Very small packets (32-64 bytes)
+            p.setLabel("NORMAL"); // ML must detect from features
             flowService.receivePacket(p);
         }
     }
 
     private void generatePortScan(List<NetworkNode> nodes, String target) {
-        // Port scanning comes from a compromised developer PC
-        NetworkNode src = nodes.stream().filter(n -> n.getId().equals("dev-pc") || n.getId().equals("emp-pc-1")).findFirst().orElse(nodes.get(0));
+        // Port scanning: sequential port probing from a compromised internal PC
+        // Feature signature: very high port_diversity, small packets, many flows
+        String srcId = INTERNAL_PCS[random.nextInt(INTERNAL_PCS.length)];
+        NetworkNode src = nodes.stream().filter(n -> n.getId().equals(srcId)).findFirst().orElse(nodes.get(0));
         int startPort = random.nextInt(1000);
         for (int port = startPort; port < startPort + 100; port++) {
             Packet p = new Packet();
@@ -97,62 +107,66 @@ public class TrafficGeneratorService {
             p.setDest(target);
             p.setProtocol("TCP");
             p.setSourcePort(1024 + random.nextInt(60000));
-            p.setDestPort(port);
-            p.setBytes(64); // SYN packets are small
-            p.setLabel("ATTACK");
+            p.setDestPort(port); // Sequential unique ports — high diversity
+            p.setBytes(40 + random.nextInt(24)); // SYN packets are very small
+            p.setLabel("NORMAL"); // ML must detect from features
             flowService.receivePacket(p);
         }
     }
 
     private void generateBruteForce(List<NetworkNode> nodes, String target) {
-        // Brute force comes from internet gateway
-        NetworkNode src = nodes.stream().filter(n -> n.getId().equals("inet-gw")).findFirst().orElse(nodes.get(0));
+        // Brute force: repeated login attempts from external, targeting auth ports
+        // Feature signature: many packets to same port (low diversity), medium size, high rate
+        String srcId = EXTERNAL_SOURCES[random.nextInt(EXTERNAL_SOURCES.length)];
         int destPort = random.nextBoolean() ? 22 : 3389; // SSH or RDP
         for (int i = 0; i < 30; i++) {
             Packet p = new Packet();
-            p.setSource(src.getId());
+            p.setSource(srcId);
             p.setDest(target);
             p.setProtocol("TCP");
             p.setSourcePort(1024 + random.nextInt(60000));
             p.setDestPort(destPort);
-            p.setBytes(128 + random.nextInt(256)); // login payload
-            p.setLabel("ATTACK");
+            p.setBytes(128 + random.nextInt(256)); // Login payload
+            p.setLabel("NORMAL"); // ML must detect from features
             flowService.receivePacket(p);
         }
     }
 
     private void generateMalwareBeaconing(List<NetworkNode> nodes, String target) {
-        // Periodic small callbacks to C2 server (the target is the compromised node sending out)
+        // Malware: compromised node phones home to C2 with periodic small callbacks
+        // Feature signature: outbound traffic, small consistent-sized packets, same dest port
         for (int i = 0; i < 5; i++) {
             Packet p = new Packet();
-            p.setSource(target); // compromised node phones home
-            p.setDest("inet-gw"); // beaconing to external
+            p.setSource(target); // Compromised node phones home
+            p.setDest("inet-gw"); // Beaconing to external
             p.setProtocol("HTTPS");
             p.setSourcePort(1024 + random.nextInt(60000));
             p.setDestPort(443);
-            p.setBytes(64 + random.nextInt(128)); // small beacon
-            p.setLabel("ATTACK");
+            p.setBytes(64 + random.nextInt(128)); // Small beacon
+            p.setLabel("NORMAL"); // ML must detect from features
             flowService.receivePacket(p);
         }
     }
 
     private void generateDataExfiltration(List<NetworkNode> nodes, String target) {
-        // Large outbound data transfers from compromised node
+        // Exfiltration: large outbound data transfers from compromised node
+        // Feature signature: very high bytes_per_sec, large avg_packet_size
         for (int i = 0; i < 10; i++) {
             Packet p = new Packet();
-            p.setSource(target); // exfiltrating FROM this node
-            p.setDest("inet-gw"); // sending to external
+            p.setSource(target); // Exfiltrating FROM this node
+            p.setDest("inet-gw"); // Sending to external
             p.setProtocol("HTTPS");
             p.setSourcePort(1024 + random.nextInt(60000));
             p.setDestPort(443);
-            p.setBytes(8000 + random.nextInt(7000)); // large data chunks
-            p.setLabel("ATTACK");
+            p.setBytes(8000 + random.nextInt(7000)); // Large data chunks
+            p.setLabel("NORMAL"); // ML must detect from features
             flowService.receivePacket(p);
         }
     }
 
     private void generateReconnaissance(List<NetworkNode> nodes, String target) {
-        // Probing from target to structural servers
+        // Recon: probing from target to structural servers
+        // Feature signature: ICMP probes to multiple targets, small packets
         NetworkNode src = nodes.stream().filter(n -> n.getId().equals(target)).findFirst().orElse(nodes.get(0));
             
         List<NetworkNode> victims = nodes.stream()
@@ -168,7 +182,7 @@ public class TrafficGeneratorService {
             p.setSourcePort(0);
             p.setDestPort(random.nextBoolean() ? 80 : 443);
             p.setBytes(64);
-            p.setLabel("ATTACK");
+            p.setLabel("NORMAL"); // ML must detect from features
             flowService.receivePacket(p);
         }
     }
@@ -179,7 +193,7 @@ public class TrafficGeneratorService {
         return switch (type) {
             case "SERVER" -> PROTOCOLS[random.nextInt(3)]; // TCP, UDP, HTTP
             case "DATABASE" -> "TCP";
-            case "IOT_DEVICE" -> random.nextBoolean() ? "UDP" : "TCP"; // MQTT/CoAP
+            case "IOT_DEVICE" -> random.nextBoolean() ? "UDP" : "TCP";
             case "FIREWALL", "ROUTER" -> PROTOCOLS[random.nextInt(PROTOCOLS.length)];
             default -> "TCP"; // PC, LAPTOP
         };

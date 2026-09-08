@@ -46,7 +46,10 @@ def train(req: TrainRequest):
         local_models[req.node_id] = AnomalyDetector()
     
     model = local_models[req.node_id]
-    X = extract_features(req.flow_data)
+    X = extract_features(req.flow_data, node_id=req.node_id, fit_scaler=True)
+    
+    if len(X) == 0:
+        return {"model_params": {}, "training_metrics": {"n_samples": 0}}
     
     metrics = model.fit(X)
     return {
@@ -60,7 +63,10 @@ def predict(req: PredictRequest):
         local_models[req.node_id] = AnomalyDetector()
     
     model = local_models[req.node_id]
-    X = extract_features(req.flow_data)
+    X = extract_features(req.flow_data, node_id=req.node_id, fit_scaler=False)
+    
+    if len(X) == 0:
+        return {"predictions": []}
     
     predictions, scores = model.predict(X)
     

@@ -1,8 +1,5 @@
-@"
-# Start all FedApp-SOC services in separate windows automatically
-
 Write-Host "Starting ML Service (Port 5000)..." -ForegroundColor Cyan
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd D:\FedApp-SOC\ml-service; py -m uvicorn main:app --reload --port 5000"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd D:\FedApp-SOC\ml-service; .\venv\Scripts\python.exe -m uvicorn main:app --reload --port 5000"
 
 Write-Host "Waiting 5 seconds for ML Service to initialize..." -ForegroundColor Yellow
 Start-Sleep -Seconds 5
@@ -19,4 +16,3 @@ Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd D:\FedApp-SOC\
 Write-Host "All services launched! Opening browser..." -ForegroundColor Green
 Start-Sleep -Seconds 3
 Start-Process "http://localhost:5173"
-"@

@@ -7,8 +7,12 @@ import java.util.concurrent.TimeUnit;
 import jakarta.annotation.PreDestroy;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 
+import com.fedanomaly.backend.repository.NetworkFlowRepository;
+
 import java.util.HashMap;
 import java.util.Map;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 
 @Service
 public class SimulationService {
@@ -17,6 +21,7 @@ public class SimulationService {
     private final FlowService flowService;
     private final TrustService trustService;
     private final FederatedLearningService fedLearningService;
+    private final NetworkFlowRepository flowRepository;
     private final SimpMessagingTemplate messagingTemplate;
     private int tickCount = 0;
     private volatile String state = "STOPPED"; // RUNNING, PAUSED, STOPPED
@@ -26,11 +31,13 @@ public class SimulationService {
                              FlowService flowService, 
                              TrustService trustService,
                              FederatedLearningService fedLearningService,
+                             NetworkFlowRepository flowRepository,
                              SimpMessagingTemplate messagingTemplate) {
         this.trafficGeneratorService = trafficGeneratorService;
         this.flowService = flowService;
         this.trustService = trustService;
         this.fedLearningService = fedLearningService;
+        this.flowRepository = flowRepository;
         this.messagingTemplate = messagingTemplate;
     }
 
@@ -87,12 +94,32 @@ public class SimulationService {
             trustService.updateTrustScores();
             
             tickCount++;
+            
+            // Clean old flows every 50 ticks to prevent unbounded H2 DB growth
+            if (tickCount % 50 == 0) {
+                cleanOldFlows();
+            }
+
             // Run FedAvg round every 20 ticks (10 seconds at 1x)
             if (tickCount % 20 == 0) {
                 fedLearningService.runFederatedRound();
             }
         } catch (Exception e) {
             System.err.println("Simulation tick error: " + e.getMessage());
+        }
+    }
+    
+    private void cleanOldFlows() {
+        Instant cutoff = Instant.now().minus(5, ChronoUnit.MINUTES);
+        // Using JPA derived query or custom query would be better, but we can do it in memory for now
+        // if we don't want to modify the repository interface.
+        // For efficiency, it's best to delete all in repo but we'll fetch and delete old ones
+        var allFlows = flowRepository.findAll();
+        var oldFlows = allFlows.stream()
+            .filter(f -> f.getTimestamp().isBefore(cutoff))
+            .toList();
+        if (!oldFlows.isEmpty()) {
+            flowRepository.deleteAll(oldFlows);
         }
     }
 

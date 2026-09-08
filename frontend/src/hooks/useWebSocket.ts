@@ -31,6 +31,19 @@ export interface SimulationEvent {
   node?: string;
   explanation?: Record<string, number>;
   timestamp?: string;
+  // new fields from backend
+  anomalyScore?: number;
+  anomalyCount?: number;
+  totalFlows?: number;
+  trafficStats?: Record<string, number>;
+  attackType?: string;
+  oldTrust?: number;
+  newTrust?: number;
+  delta?: number;
+  reason?: string;
+  status?: string;
+  target?: string;
+  accuracy?: number;
 }
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080';
@@ -41,9 +54,40 @@ export function useWebSocket() {
   const [events, setEvents] = useState<SimulationEvent[]>([]);
   const [nodeUpdates, setNodeUpdates] = useState<any[]>([]);
   const [simulationState, setSimulationState] = useState<any>(null);
+  
   const clientRef = useRef<Client | null>(null);
 
+  // Buffer for incoming messages to throttle state updates (fixes massive re-render lag)
+  const packetBuffer = useRef<Packet[]>([]);
+  const flowBuffer = useRef<NetworkFlow[]>([]);
+  const eventBuffer = useRef<SimulationEvent[]>([]);
+
   useEffect(() => {
+    // Throttled update loop (runs every 200ms instead of on every single message)
+    const interval = setInterval(() => {
+      if (packetBuffer.current.length > 0) {
+        setPackets(prev => {
+          const next = [...packetBuffer.current, ...prev].slice(0, 100);
+          packetBuffer.current = []; // flush buffer
+          return next;
+        });
+      }
+      if (flowBuffer.current.length > 0) {
+        setFlows(prev => {
+          const next = [...flowBuffer.current, ...prev].slice(0, 50);
+          flowBuffer.current = [];
+          return next;
+        });
+      }
+      if (eventBuffer.current.length > 0) {
+        setEvents(prev => {
+          const next = [...eventBuffer.current, ...prev].slice(0, 100);
+          eventBuffer.current = [];
+          return next;
+        });
+      }
+    }, 200);
+
     // 1. Establish SockJS connection
     const socket = new SockJS(`${API_URL}/ws`);
     const client = new Client({
@@ -57,13 +101,13 @@ export function useWebSocket() {
       client.subscribe('/topic/packets', (message) => {
         const packet: Packet = JSON.parse(message.body);
         packet.receivedAt = Date.now();
-        setPackets(prev => [packet, ...prev].slice(0, 100));
+        packetBuffer.current.unshift(packet);
       });
 
       client.subscribe('/topic/flows', (message) => {
         const flow: NetworkFlow = JSON.parse(message.body);
         flow.receivedAt = Date.now();
-        setFlows(prev => [flow, ...prev].slice(0, 50));
+        flowBuffer.current.unshift(flow);
       });
 
       client.subscribe('/topic/events', (message) => {
@@ -71,7 +115,7 @@ export function useWebSocket() {
           ...JSON.parse(message.body),
           timestamp: new Date().toLocaleTimeString(),
         };
-        setEvents(prev => [event, ...prev].slice(0, 100));
+        eventBuffer.current.unshift(event);
       });
 
       client.subscribe('/topic/nodes', (message) => {
@@ -93,6 +137,7 @@ export function useWebSocket() {
     clientRef.current = client;
 
     return () => {
+      clearInterval(interval);
       client.deactivate();
     };
   }, []);
