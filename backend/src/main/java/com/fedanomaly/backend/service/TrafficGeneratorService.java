@@ -90,7 +90,7 @@ public class TrafficGeneratorService {
             p.setSourcePort(1024 + random.nextInt(60000));
             p.setDestPort(80); // All targeting same port — low diversity
             p.setBytes(32 + random.nextInt(32)); // Very small packets (32-64 bytes)
-            p.setLabel("NORMAL"); // ML must detect from features
+            p.setLabel("ATTACK");
             flowService.receivePacket(p);
         }
     }
@@ -109,7 +109,7 @@ public class TrafficGeneratorService {
             p.setSourcePort(1024 + random.nextInt(60000));
             p.setDestPort(port); // Sequential unique ports — high diversity
             p.setBytes(40 + random.nextInt(24)); // SYN packets are very small
-            p.setLabel("NORMAL"); // ML must detect from features
+            p.setLabel("ATTACK");
             flowService.receivePacket(p);
         }
     }
@@ -127,7 +127,7 @@ public class TrafficGeneratorService {
             p.setSourcePort(1024 + random.nextInt(60000));
             p.setDestPort(destPort);
             p.setBytes(128 + random.nextInt(256)); // Login payload
-            p.setLabel("NORMAL"); // ML must detect from features
+            p.setLabel("ATTACK");
             flowService.receivePacket(p);
         }
     }
@@ -143,7 +143,7 @@ public class TrafficGeneratorService {
             p.setSourcePort(1024 + random.nextInt(60000));
             p.setDestPort(443);
             p.setBytes(64 + random.nextInt(128)); // Small beacon
-            p.setLabel("NORMAL"); // ML must detect from features
+            p.setLabel("ATTACK");
             flowService.receivePacket(p);
         }
     }
@@ -159,7 +159,7 @@ public class TrafficGeneratorService {
             p.setSourcePort(1024 + random.nextInt(60000));
             p.setDestPort(443);
             p.setBytes(8000 + random.nextInt(7000)); // Large data chunks
-            p.setLabel("NORMAL"); // ML must detect from features
+            p.setLabel("ATTACK");
             flowService.receivePacket(p);
         }
     }
@@ -182,7 +182,7 @@ public class TrafficGeneratorService {
             p.setSourcePort(0);
             p.setDestPort(random.nextBoolean() ? 80 : 443);
             p.setBytes(64);
-            p.setLabel("NORMAL"); // ML must detect from features
+            p.setLabel("ATTACK");
             flowService.receivePacket(p);
         }
     }
