@@ -122,10 +122,11 @@ public class FlowService {
                     @SuppressWarnings("unchecked")
                     List<Map<String, Object>> preds = (List<Map<String, Object>>) response.get("predictions");
                     
-                    int anomalyCount = 0;
-                    double maxScore = 0;
-                    Map<String, Object> bestExplanation = null;
-                    
+                    // Track which sources are generating anomalous flows
+                    Map<String, Integer> sourceAnomalyCounts = new HashMap<>();
+                    Map<String, Double> sourceMaxScores = new HashMap<>();
+                    Map<String, Map<String, Object>> sourceExplanations = new HashMap<>();
+
                     for (int i = 0; i < preds.size() && i < nodeFlows.size(); i++) {
                         Map<String, Object> pred = preds.get(i);
                         boolean isAnomaly = (Boolean) pred.get("is_anomaly");
@@ -136,46 +137,48 @@ public class FlowService {
                         f.setAnomalyScore(score);
                         
                         if (isAnomaly) {
-                            anomalyCount++;
-                            if (Math.abs(score) > Math.abs(maxScore)) {
-                                maxScore = score;
+                            String attackerId = f.getSourceNode();
+                            sourceAnomalyCounts.put(attackerId, sourceAnomalyCounts.getOrDefault(attackerId, 0) + 1);
+                            
+                            if (Math.abs(score) > Math.abs(sourceMaxScores.getOrDefault(attackerId, 0.0))) {
+                                sourceMaxScores.put(attackerId, score);
                                 @SuppressWarnings("unchecked")
                                 Map<String, Object> expl = (Map<String, Object>) pred.get("explanation");
-                                bestExplanation = expl;
+                                sourceExplanations.put(attackerId, expl);
                             }
                         }
                     }
                     
-                    // If ML detected anomalies in traffic arriving at this node, mark it
-                    if (anomalyCount > 0) {
-                        final int finalAnomalyCount = anomalyCount;
-                        final double finalMaxScore = maxScore;
-                        final Map<String, Object> finalExplanation = bestExplanation;
+                    // Mitigate the ATTACKERS, not the victim
+                    for (Map.Entry<String, Integer> anomalyEntry : sourceAnomalyCounts.entrySet()) {
+                        String attackerId = anomalyEntry.getKey();
+                        int sourceAnomalyCount = anomalyEntry.getValue();
+                        double maxScore = sourceMaxScores.get(attackerId);
+                        Map<String, Object> bestExplanation = sourceExplanations.get(attackerId);
                         
-                        nodeRepository.findById(nodeId).ifPresent(node -> {
-                            if (node.getStatus() != NodeStatus.QUARANTINED) {
-                                node.setStatus(NodeStatus.SUSPICIOUS);
-                                nodeRepository.save(node);
+                        nodeRepository.findById(attackerId).ifPresent(attackerNode -> {
+                            if (attackerNode.getStatus() != NodeStatus.QUARANTINED) {
+                                attackerNode.setStatus(NodeStatus.SUSPICIOUS);
+                                nodeRepository.save(attackerNode);
                                 messagingTemplate.convertAndSend("/topic/nodes", nodeRepository.findAll());
                                 
                                 // Build rich detection event
                                 Map<String, Object> event = new HashMap<>();
                                 event.put("type", "ANOMALY_DETECTED");
-                                event.put("node", nodeId);
-                                event.put("anomalyScore", Math.round(finalMaxScore * 10000.0) / 10000.0);
-                                event.put("anomalyCount", finalAnomalyCount);
+                                event.put("node", attackerId); // Visual timeline focuses on the one being punished
+                                event.put("anomalyScore", Math.round(maxScore * 10000.0) / 10000.0);
+                                event.put("anomalyCount", sourceAnomalyCount);
                                 event.put("totalFlows", flowMaps.size());
                                 event.put("timestamp", Instant.now().toString());
                                 
                                 // Add XAI explanation
-                                if (finalExplanation != null && !finalExplanation.isEmpty()) {
-                                    event.put("explanation", finalExplanation);
-                                    String topFeature = finalExplanation.keySet().iterator().next();
-                                    event.put("message", "ML detected anomaly: abnormal " + topFeature + 
-                                        " (" + finalAnomalyCount + "/" + flowMaps.size() + " flows flagged)");
+                                if (bestExplanation != null && !bestExplanation.isEmpty()) {
+                                    event.put("explanation", bestExplanation);
+                                    String topFeature = bestExplanation.keySet().iterator().next();
+                                    event.put("message", "IDS at " + nodeId + " flagged " + attackerId + 
+                                        " for abnormal " + topFeature);
                                 } else {
-                                    event.put("message", "ML detected anomalous traffic pattern (" + 
-                                        finalAnomalyCount + "/" + flowMaps.size() + " flows flagged)");
+                                    event.put("message", "IDS at " + nodeId + " flagged anomalous traffic from " + attackerId);
                                 }
                                 
                                 // Add traffic context
@@ -188,15 +191,7 @@ public class FlowService {
                                 Map<String, Object> trafficStats = new HashMap<>();
                                 trafficStats.put("avgPacketsPerSec", Math.round(avgPps * 10.0) / 10.0);
                                 trafficStats.put("avgBytesPerSec", Math.round(avgBps * 10.0) / 10.0);
-                                trafficStats.put("totalPackets", flowMaps.stream()
-                                    .mapToLong(m -> ((Number) m.get("packet_count")).longValue()).sum());
                                 event.put("trafficStats", trafficStats);
-                                
-                                // Add active attack info if known
-                                Map<String, String> attacks = attackService.getActiveAttacks();
-                                if (attacks.containsKey(nodeId)) {
-                                    event.put("attackType", attacks.get(nodeId));
-                                }
                                 
                                 messagingTemplate.convertAndSend("/topic/events", event);
                             }
