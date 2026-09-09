@@ -14,21 +14,57 @@ import java.time.Instant;
 public class TrustService {
     private final NetworkNodeRepository nodeRepository;
     private final SimpMessagingTemplate messagingTemplate;
+    private final AttackService attackService;
 
-    public TrustService(NetworkNodeRepository nodeRepository, SimpMessagingTemplate messagingTemplate) {
+    public TrustService(NetworkNodeRepository nodeRepository, SimpMessagingTemplate messagingTemplate, AttackService attackService) {
         this.nodeRepository = nodeRepository;
         this.messagingTemplate = messagingTemplate;
+        this.attackService = attackService;
+    }
+
+    private Map<String, String> getActiveAttacks() {
+        return attackService.getActiveAttacks();
     }
 
     public void updateTrustScores() {
         List<NetworkNode> nodes = nodeRepository.findAll();
         boolean changed = false;
         
+        // Get active attacks so we can directly decay target node trust
+        Map<String, String> activeAttacks = getActiveAttacks();
+        
         for (NetworkNode node : nodes) {
             double oldTrust = node.getTrustScore();
             String reason = null;
 
-            if (node.getStatus() == NodeStatus.SUSPICIOUS) {
+            // Direct trust decay for nodes under active attack
+            boolean isUnderAttack = activeAttacks.containsKey(node.getId());
+
+            if (isUnderAttack && node.getStatus() != NodeStatus.QUARANTINED) {
+                // Mark node as UNDER_ATTACK and apply aggressive trust decay
+                node.setStatus(NodeStatus.UNDER_ATTACK);
+                double decay = 5.0; // Aggressive decay during active attack
+                node.setTrustScore(Math.max(0, node.getTrustScore() - decay));
+                reason = "Active " + activeAttacks.get(node.getId()) + " attack — trust decaying rapidly";
+
+                if (node.getTrustScore() < 30) {
+                    node.setStatus(NodeStatus.QUARANTINED);
+                    reason = "Trust below quarantine threshold (30) — node isolated";
+
+                    // Emit mitigation event
+                    Map<String, Object> mitigationEvent = new HashMap<>();
+                    mitigationEvent.put("type", "MITIGATION");
+                    mitigationEvent.put("node", node.getId());
+                    mitigationEvent.put("action", "QUARANTINE");
+                    mitigationEvent.put("trustScore", node.getTrustScore());
+                    mitigationEvent.put("timestamp", Instant.now().toString());
+                    mitigationEvent.put("message", node.getName() + " quarantined — trust " + 
+                        String.format("%.1f", node.getTrustScore()) + " < 30 threshold");
+                    messagingTemplate.convertAndSend("/topic/events", mitigationEvent);
+                }
+                changed = true;
+
+            } else if (node.getStatus() == NodeStatus.SUSPICIOUS) {
                 // Trust decay for suspicious nodes — proportional to how suspicious
                 double decay = 2.5;
                 node.setTrustScore(Math.max(0, node.getTrustScore() - decay));

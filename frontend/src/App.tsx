@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
-import { ReactFlow, Background, Controls, MiniMap } from '@xyflow/react';
+import { ReactFlow, Background, Controls } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { Activity, ShieldAlert, Database, Clock, Zap, RotateCcw } from 'lucide-react';
 import { useWebSocket } from './hooks/useWebSocket';
@@ -312,17 +312,6 @@ export default function App() {
           >
             <Background color="#1a2030" gap={20} size={1} />
             <Controls showInteractive={false} className="!bg-soc-panel !border-soc-border !fill-soc-muted" />
-            <MiniMap
-              nodeStrokeColor="#374151"
-              nodeColor={(n) => {
-                const s = n.data?.status;
-                if (s === 'QUARANTINED') return '#374151';
-                if (s === 'SUSPICIOUS' || s === 'UNDER_ATTACK') return '#ef4444';
-                return '#10b981';
-              }}
-              maskColor="rgba(0,0,0,0.6)"
-              style={{ background: '#05070a', border: '1px solid #1f2937' }}
-            />
           </ReactFlow>
 
           {liveSelectedNode && (
