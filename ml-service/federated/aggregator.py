@@ -39,8 +39,8 @@ class FedAvgAggregator:
             return {}
             
         # Trust-Weighted tree selection:
-        # Sample trees from each model proportional to its trust weight
-        global_model = models[0]
+        # Use the model with the largest max_samples_ as the base to prevent IndexError during prediction
+        global_model = max(models, key=lambda m: getattr(m, "max_samples_", 0))
         combined_estimators = []
         combined_features = []
         
