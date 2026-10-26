@@ -8,6 +8,7 @@ public class Packet {
     private int destPort;
     private int bytes;
     private String label; // NORMAL or ATTACK
+    private long timestampMs; // simulated arrival time
 
     public String getSource() { return source; }
     public void setSource(String source) { this.source = source; }
@@ -23,4 +24,6 @@ public class Packet {
     public void setBytes(int bytes) { this.bytes = bytes; }
     public String getLabel() { return label; }
     public void setLabel(String label) { this.label = label; }
+    public long getTimestampMs() { return timestampMs; }
+    public void setTimestampMs(long timestampMs) { this.timestampMs = timestampMs; }
 }

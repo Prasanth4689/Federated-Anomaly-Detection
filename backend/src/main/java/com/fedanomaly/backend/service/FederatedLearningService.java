@@ -55,9 +55,12 @@ public class FederatedLearningService {
             // Skip quarantined nodes (do not include compromised models)
             if (node.getStatus() == NodeStatus.QUARANTINED) continue;
 
-            // Only use flows where this node was involved
+            // Only use flows where this node was involved, and only those the current model
+            // judged normal: keeps detected attack floods from being learned as "normal".
+            // (Uses the model's own prediction label, never simulated ground truth.)
             List<NetworkFlow> nodeFlows = allFlows.stream()
                 .filter(f -> f.getSourceNode().equals(node.getId()) || f.getDestNode().equals(node.getId()))
+                .filter(f -> !"ANOMALY".equals(f.getLabel()))
                 .collect(Collectors.toList());
                 
             if (nodeFlows.isEmpty()) continue;
@@ -68,7 +71,7 @@ public class FederatedLearningService {
             List<Map<String, Object>> flows = new ArrayList<>();
             for(NetworkFlow f : nodeFlows) {
                 Map<String, Object> map = new HashMap<>();
-                map.put("flow_id", f.getId() != null ? f.getId().toString() : UUID.randomUUID().toString());
+                map.put("flow_id", f.getFlowId() != null ? f.getFlowId().toString() : String.valueOf(f.getId()));
                 map.put("duration_ms", f.getDurationMs());
                 map.put("packet_count", f.getPacketCount());
                 map.put("total_bytes", f.getTotalBytes());
@@ -123,7 +126,7 @@ public class FederatedLearningService {
                 
                 // Genuine evaluation metrics computed from actual model predictions
                 Map<String, Double> metrics = flowService.getEvaluationMetrics();
-                double accuracy = metrics.getOrDefault("accuracy", 92.5);
+                double accuracy = metrics.getOrDefault("accuracy", 0.0);
 
                 // Persist round record in database
                 FederatedRound round = new FederatedRound();
@@ -143,19 +146,19 @@ public class FederatedLearningService {
                 event.put("precision", metrics.get("precision"));
                 event.put("recall", metrics.get("recall"));
                 event.put("f1", metrics.get("f1"));
+                event.put("samples", metrics.get("samples"));
                 event.put("message", "FedAvg completed with " + clientModels.size() + " participants. Model v" + version + ".0");
                 messagingTemplate.convertAndSend("/topic/events", event);
             }
         } catch (Exception e) {
             System.err.println("Failed FedAvg round: " + e.getMessage());
-            int fallbackVersion = (int) roundRepository.count() + 1;
-            Map<String, Object> fallbackEvent = new HashMap<>();
-            fallbackEvent.put("type", "FED_ROUND_COMPLETE");
-            fallbackEvent.put("version", fallbackVersion);
-            fallbackEvent.put("participants", clientModels.size());
-            fallbackEvent.put("accuracy", flowService.getEvaluationMetrics().getOrDefault("accuracy", 90.0));
-            fallbackEvent.put("message", "Local training round complete (" + clientModels.size() + " nodes)");
-            messagingTemplate.convertAndSend("/topic/events", fallbackEvent);
+            // Report the failure; do not present it as a completed round
+            Map<String, Object> failEvent = new HashMap<>();
+            failEvent.put("type", "FED_ROUND_FAILED");
+            failEvent.put("participants", clientModels.size());
+            failEvent.put("timestamp", Instant.now().toString());
+            failEvent.put("message", "FedAvg aggregation failed (" + clientModels.size() + " local models trained): " + e.getMessage());
+            messagingTemplate.convertAndSend("/topic/events", failEvent);
         }
     }
 }

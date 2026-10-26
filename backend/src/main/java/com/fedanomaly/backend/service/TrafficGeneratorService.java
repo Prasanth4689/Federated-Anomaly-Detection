@@ -8,6 +8,8 @@ import com.fedanomaly.backend.repository.NetworkNodeRepository;
 
 import java.util.List;
 import java.util.Random;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 @Service
 public class TrafficGeneratorService {
@@ -15,6 +17,15 @@ public class TrafficGeneratorService {
     private final FlowService flowService;
     private final AttackService attackService;
     private final Random random = new Random();
+
+    // Simulated clock: each tick is one observation window of WINDOW_MS
+    private static final int WINDOW_MS = 500;
+    private long simClockMs = 0;
+    private long windowStartMs = 0;
+
+    // Nodes isolated by incident response; refreshed every tick
+    private Set<String> quarantinedIds = Set.of();
+    private long blockedPackets = 0;
 
     // Realistic port distributions per node type
     private static final int[] WEB_PORTS = {80, 443, 8080, 8443};
@@ -37,16 +48,21 @@ public class TrafficGeneratorService {
         List<NetworkNode> nodes = nodeRepository.findAll();
         if (nodes.size() < 2) return;
 
-        // Active nodes eligible for normal traffic
-        List<NetworkNode> activeNodes = nodes.stream()
-            .filter(n -> n.getStatus() != NodeStatus.QUARANTINED)
+        windowStartMs = simClockMs;
+        simClockMs += WINDOW_MS;
+
+        quarantinedIds = nodes.stream()
+            .filter(n -> n.getStatus() == NodeStatus.QUARANTINED)
+            .map(NetworkNode::getId)
+            .collect(Collectors.toSet());
+
+        // Active nodes eligible for normal traffic (quarantined nodes are isolated)
+        List<NetworkNode> trafficPool = nodes.stream()
+            .filter(n -> !quarantinedIds.contains(n.getId()))
             .toList();
 
-        // Fallback to all nodes if all were quarantined so the network simulation never deadlocks
-        List<NetworkNode> trafficPool = activeNodes.size() >= 2 ? activeNodes : nodes;
-
         // Generate normal background traffic based on node profiles
-        int numPackets = random.nextInt(10) + 5;
+        int numPackets = trafficPool.size() >= 2 ? random.nextInt(10) + 5 : 0;
         for (int i = 0; i < numPackets; i++) {
             NetworkNode src = trafficPool.get(random.nextInt(trafficPool.size()));
             NetworkNode dst = trafficPool.get(random.nextInt(trafficPool.size()));
@@ -61,7 +77,7 @@ public class TrafficGeneratorService {
             p.setBytes(getTypicalBytesForType(src.getType().name()));
             p.setLabel("NORMAL");
 
-            flowService.receivePacket(p);
+            emit(p);
         }
 
         // Generate attack traffic — runs actively whenever an attack is injected
@@ -93,7 +109,7 @@ public class TrafficGeneratorService {
             p.setDestPort(80);
             p.setBytes(32 + random.nextInt(32));
             p.setLabel("ATTACK");
-            flowService.receivePacket(p);
+            emit(p);
         }
     }
 
@@ -111,7 +127,7 @@ public class TrafficGeneratorService {
             p.setDestPort(port);
             p.setBytes(40 + random.nextInt(24));
             p.setLabel("ATTACK");
-            flowService.receivePacket(p);
+            emit(p);
         }
     }
 
@@ -127,7 +143,7 @@ public class TrafficGeneratorService {
             p.setDestPort(destPort);
             p.setBytes(128 + random.nextInt(256));
             p.setLabel("ATTACK");
-            flowService.receivePacket(p);
+            emit(p);
         }
     }
 
@@ -141,7 +157,7 @@ public class TrafficGeneratorService {
             p.setDestPort(443);
             p.setBytes(64 + random.nextInt(128));
             p.setLabel("ATTACK");
-            flowService.receivePacket(p);
+            emit(p);
         }
     }
 
@@ -155,7 +171,7 @@ public class TrafficGeneratorService {
             p.setDestPort(443);
             p.setBytes(8000 + random.nextInt(7000));
             p.setLabel("ATTACK");
-            flowService.receivePacket(p);
+            emit(p);
         }
     }
 
@@ -176,8 +192,25 @@ public class TrafficGeneratorService {
             p.setDestPort(random.nextBoolean() ? 80 : 443);
             p.setBytes(64);
             p.setLabel("ATTACK");
-            flowService.receivePacket(p);
+            emit(p);
         }
+    }
+
+    /**
+     * Single exit point for simulated packets. Quarantine is enforced here:
+     * packets from or to a quarantined node are dropped (the node is isolated).
+     */
+    private void emit(Packet p) {
+        if (quarantinedIds.contains(p.getSource()) || quarantinedIds.contains(p.getDest())) {
+            blockedPackets++;
+            return;
+        }
+        p.setTimestampMs(windowStartMs + random.nextInt(WINDOW_MS));
+        flowService.receivePacket(p);
+    }
+
+    public long getBlockedPackets() {
+        return blockedPackets;
     }
 
     // --- Node Profile Helpers ---

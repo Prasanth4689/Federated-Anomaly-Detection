@@ -43,6 +43,7 @@ public class SimulationService {
 
     public void startSimulation() {
         if ("RUNNING".equals(state)) return;
+        if ("STOPPED".equals(state)) flowService.startNewSimulation();
         state = "RUNNING";
         executorService = Executors.newSingleThreadScheduledExecutor();
         long interval = 500 / speedMultiplier;
