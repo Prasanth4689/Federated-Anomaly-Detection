@@ -89,9 +89,9 @@ export function useWebSocket() {
     }, 200);
 
     // 1. Establish SockJS connection
-    const socket = new SockJS(`${API_URL}/ws`);
+    // A fresh socket per (re)connect attempt; reusing one closed socket made reconnects fail
     const client = new Client({
-      webSocketFactory: () => socket,
+      webSocketFactory: () => new SockJS(`${API_URL}/ws`),
       reconnectDelay: 5000,
       heartbeatIncoming: 4000,
       heartbeatOutgoing: 4000,

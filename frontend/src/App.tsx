@@ -100,6 +100,14 @@ export default function App() {
       .then(r => r.json())
       .then(setActiveAttacks)
       .catch(() => {});
+    // State is only pushed on start/pause/stop, so a page opened mid-run must fetch it
+    fetch(`${API_URL}/api/simulation/state`)
+      .then(r => r.json())
+      .then(s => {
+        if (s?.state) setSimState(s.state);
+        if (s?.speed) setSimSpeed(s.speed);
+      })
+      .catch(() => {});
   }, []);
 
   // ── Live updates ───────────────────────────────────────────────────────────
