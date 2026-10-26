@@ -4,7 +4,8 @@ export type NodeStatus =
   | "SYNCHRONIZING"
   | "SUSPICIOUS"
   | "UNDER_ATTACK"
-  | "QUARANTINED";
+  | "QUARANTINED"
+  | "RECOVERING";
 
 export type AttackType = 
   | "DDOS"

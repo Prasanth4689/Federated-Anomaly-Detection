@@ -27,13 +27,18 @@ const statusColor: Record<string, string> = {
   SUSPICIOUS:    'text-amber-400',
   UNDER_ATTACK:  'text-red-400',
   QUARANTINED:   'text-gray-400',
+  RECOVERING:    'text-cyan-400',
 };
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080';
 
-export default function NodeDetailPanel({ node, onClose, packets, flows, currentRound }: NodeDetailPanelProps) {
-  if (!node) return null;
+// Early return lives in this wrapper so the body always calls the same hooks in the same order.
+export default function NodeDetailPanel(props: NodeDetailPanelProps) {
+  if (!props.node) return null;
+  return <NodeDetailPanelBody {...props} />;
+}
 
+function NodeDetailPanelBody({ node, onClose, packets, flows, currentRound }: NodeDetailPanelProps) {
   const [restoring, setRestoring] = useState(false);
   const data = node.data;
   const status: string = data.status || 'HEALTHY';
@@ -115,7 +120,7 @@ export default function NodeDetailPanel({ node, onClose, packets, flows, current
             <span className="text-[10px] text-soc-muted uppercase font-bold tracking-wider">Status</span>
             <span className={`text-xs font-bold ${statusColor[status] || 'text-soc-text'}`}>{status}</span>
           </div>
-          {status !== 'HEALTHY' && (
+          {(status === 'QUARANTINED' || status === 'SUSPICIOUS') && (
             <button
               onClick={handleRestore}
               disabled={restoring}

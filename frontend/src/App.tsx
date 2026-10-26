@@ -155,13 +155,10 @@ export default function App() {
   const currentRound    = fedRoundEvents.length > 0 ? (fedRoundEvents[0].version ?? fedRounds) : initialRound;
   const anomalyCount    = useMemo(() => events.filter(e => e.type === 'ANOMALY_DETECTED').length, [events]);
   const accuracy = useMemo(() => {
-    if (fedRoundEvents.length > 0 && fedRoundEvents[0].accuracy) {
+    if (fedRoundEvents.length > 0 && fedRoundEvents[0].accuracy != null) {
       return fedRoundEvents[0].accuracy;
     }
-    if (initialAccuracy !== null) {
-      return initialAccuracy;
-    }
-    return 92.5;
+    return initialAccuracy; // null until a real round has been evaluated
   }, [fedRoundEvents, initialAccuracy]);
 
   const networkLoad = useMemo(() => {
@@ -283,7 +280,7 @@ export default function App() {
             <div className="w-px h-6 bg-soc-border"></div>
             <div className="flex flex-col">
               <span className="text-[9px] text-soc-muted uppercase">Global Accuracy</span>
-              <span className={`text-xs font-bold ${accuracy >= 90 ? 'text-emerald-400' : 'text-amber-400'}`}>{(accuracy ?? 0).toFixed(1)}%</span>
+              <span className={`text-xs font-bold ${accuracy == null ? 'text-soc-muted' : accuracy >= 90 ? 'text-emerald-400' : 'text-amber-400'}`}>{accuracy == null ? '—' : `${accuracy.toFixed(1)}%`}</span>
             </div>
           </div>
 

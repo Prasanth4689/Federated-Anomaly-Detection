@@ -20,6 +20,7 @@ const statusConfig: Record<string, { border: string; iconBg: string; iconColor: 
   SUSPICIOUS:     { border: 'border-amber-400',      iconBg: 'bg-amber-900/30',    iconColor: 'text-amber-400',   shadow: 'shadow-[0_0_12px_rgba(251,191,36,0.4)]',   pulse: false, dim: false },
   UNDER_ATTACK:   { border: 'border-red-500',        iconBg: 'bg-red-900/30',      iconColor: 'text-red-400',     shadow: 'shadow-[0_0_20px_rgba(239,68,68,0.7)]',    pulse: true,  dim: false },
   QUARANTINED:    { border: 'border-gray-600',       iconBg: 'bg-gray-800',        iconColor: 'text-gray-500',    shadow: '',                                         pulse: false, dim: true  },
+  RECOVERING:     { border: 'border-cyan-400/70',    iconBg: 'bg-cyan-900/30',     iconColor: 'text-cyan-400',    shadow: 'shadow-[0_0_10px_rgba(34,211,238,0.35)]',  pulse: false, dim: false },
 };
 
 function CustomNode({ data, selected }: any) {
@@ -95,6 +96,7 @@ function CustomNode({ data, selected }: any) {
                 <div className="text-[9px] text-soc-muted leading-tight mt-0.5">
                   {status === 'HEALTHY' ? 'Normal behavioral patterns verified.' : 
                    status === 'QUARANTINED' ? 'Node isolated due to critical trust drop.' :
+                   status === 'RECOVERING' ? 'On probation: trust being re-earned through clean traffic.' :
                    'Suspicious deviations detected in traffic.'}
                 </div>
               </div>
