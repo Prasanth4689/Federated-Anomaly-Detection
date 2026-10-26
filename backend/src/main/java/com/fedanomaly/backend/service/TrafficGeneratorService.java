@@ -2,6 +2,7 @@ package com.fedanomaly.backend.service;
 
 import org.springframework.stereotype.Service;
 import com.fedanomaly.backend.model.NetworkNode;
+import com.fedanomaly.backend.model.NodeStatus;
 import com.fedanomaly.backend.model.Packet;
 import com.fedanomaly.backend.repository.NetworkNodeRepository;
 
@@ -36,26 +37,33 @@ public class TrafficGeneratorService {
         List<NetworkNode> nodes = nodeRepository.findAll();
         if (nodes.size() < 2) return;
 
-        // Generate normal traffic based on node profiles
-        int numPackets = random.nextInt(10) + 5;
-        for (int i = 0; i < numPackets; i++) {
-            NetworkNode src = nodes.get(random.nextInt(nodes.size()));
-            NetworkNode dst = nodes.get(random.nextInt(nodes.size()));
-            if (src.getId().equals(dst.getId())) continue;
+        // Quarantined nodes cannot participate in normal traffic (quarantine restriction)
+        List<NetworkNode> activeNodes = nodes.stream()
+            .filter(n -> n.getStatus() != NodeStatus.QUARANTINED)
+            .toList();
 
-            Packet p = new Packet();
-            p.setSource(src.getId());
-            p.setDest(dst.getId());
-            p.setProtocol(getProtocolForType(src.getType().name()));
-            p.setSourcePort(1024 + random.nextInt(60000));
-            p.setDestPort(getDestPortForType(dst.getType().name()));
-            p.setBytes(getTypicalBytesForType(src.getType().name()));
-            p.setLabel("NORMAL");
+        if (activeNodes.size() >= 2) {
+            // Generate normal traffic based on node profiles among non-quarantined nodes
+            int numPackets = random.nextInt(10) + 5;
+            for (int i = 0; i < numPackets; i++) {
+                NetworkNode src = activeNodes.get(random.nextInt(activeNodes.size()));
+                NetworkNode dst = activeNodes.get(random.nextInt(activeNodes.size()));
+                if (src.getId().equals(dst.getId())) continue;
 
-            flowService.receivePacket(p);
+                Packet p = new Packet();
+                p.setSource(src.getId());
+                p.setDest(dst.getId());
+                p.setProtocol(getProtocolForType(src.getType().name()));
+                p.setSourcePort(1024 + random.nextInt(60000));
+                p.setDestPort(getDestPortForType(dst.getType().name()));
+                p.setBytes(getTypicalBytesForType(src.getType().name()));
+                p.setLabel("NORMAL");
+
+                flowService.receivePacket(p);
+            }
         }
 
-        // Generate attack traffic — ALL packets use label "NORMAL" so ML must detect from features
+        // Generate attack traffic — attacks targeting or originating from quarantined nodes are suppressed
         attackService.getActiveAttacks().forEach((target, type) -> {
             String normalised = type.toUpperCase();
             if (normalised.startsWith("DDOS")) {
@@ -74,32 +82,43 @@ public class TrafficGeneratorService {
         });
     }
 
-    // --- Attack Traffic Generators ---
-    // Key change: label is always "NORMAL" — detection comes from ML observing
-    // anomalous traffic FEATURES (volume, packet size, port diversity, rate)
+    private boolean isQuarantined(List<NetworkNode> nodes, String nodeId) {
+        return nodes.stream()
+            .filter(n -> n.getId().equals(nodeId))
+            .findFirst()
+            .map(n -> n.getStatus() == NodeStatus.QUARANTINED)
+            .orElse(false);
+    }
 
     private void generateDDoS(List<NetworkNode> nodes, String target) {
-        // DDoS: high-volume small packets from multiple external sources
-        // Feature signature: very high packets_per_sec, very low avg_packet_size, low port_diversity
+        // If target is quarantined, traffic is blocked at the perimeter
+        if (isQuarantined(nodes, target)) return;
+
         for (int i = 0; i < 50; i++) {
             Packet p = new Packet();
-            // Rotate among external sources to simulate botnet
             p.setSource(EXTERNAL_SOURCES[random.nextInt(EXTERNAL_SOURCES.length)]);
             p.setDest(target);
             p.setProtocol(random.nextBoolean() ? "TCP" : "UDP");
             p.setSourcePort(1024 + random.nextInt(60000));
-            p.setDestPort(80); // All targeting same port — low diversity
-            p.setBytes(32 + random.nextInt(32)); // Very small packets (32-64 bytes)
+            p.setDestPort(80);
+            p.setBytes(32 + random.nextInt(32));
             p.setLabel("ATTACK");
             flowService.receivePacket(p);
         }
     }
 
     private void generatePortScan(List<NetworkNode> nodes, String target) {
-        // Port scanning: sequential port probing from a compromised internal PC
-        // Feature signature: very high port_diversity, small packets, many flows
-        String srcId = INTERNAL_PCS[random.nextInt(INTERNAL_PCS.length)];
+        if (isQuarantined(nodes, target)) return;
+
+        // Choose non-quarantined internal PC if available
+        List<String> activeInternal = List.of(INTERNAL_PCS).stream()
+            .filter(id -> !isQuarantined(nodes, id))
+            .toList();
+        if (activeInternal.isEmpty()) return; // All attacker PCs quarantined
+
+        String srcId = activeInternal.get(random.nextInt(activeInternal.size()));
         NetworkNode src = nodes.stream().filter(n -> n.getId().equals(srcId)).findFirst().orElse(nodes.get(0));
+        
         int startPort = random.nextInt(1000);
         for (int port = startPort; port < startPort + 100; port++) {
             Packet p = new Packet();
@@ -107,18 +126,18 @@ public class TrafficGeneratorService {
             p.setDest(target);
             p.setProtocol("TCP");
             p.setSourcePort(1024 + random.nextInt(60000));
-            p.setDestPort(port); // Sequential unique ports — high diversity
-            p.setBytes(40 + random.nextInt(24)); // SYN packets are very small
+            p.setDestPort(port);
+            p.setBytes(40 + random.nextInt(24));
             p.setLabel("ATTACK");
             flowService.receivePacket(p);
         }
     }
 
     private void generateBruteForce(List<NetworkNode> nodes, String target) {
-        // Brute force: repeated login attempts from external, targeting auth ports
-        // Feature signature: many packets to same port (low diversity), medium size, high rate
+        if (isQuarantined(nodes, target)) return;
+
         String srcId = EXTERNAL_SOURCES[random.nextInt(EXTERNAL_SOURCES.length)];
-        int destPort = random.nextBoolean() ? 22 : 3389; // SSH or RDP
+        int destPort = random.nextBoolean() ? 22 : 3389;
         for (int i = 0; i < 30; i++) {
             Packet p = new Packet();
             p.setSource(srcId);
@@ -126,53 +145,56 @@ public class TrafficGeneratorService {
             p.setProtocol("TCP");
             p.setSourcePort(1024 + random.nextInt(60000));
             p.setDestPort(destPort);
-            p.setBytes(128 + random.nextInt(256)); // Login payload
+            p.setBytes(128 + random.nextInt(256));
             p.setLabel("ATTACK");
             flowService.receivePacket(p);
         }
     }
 
     private void generateMalwareBeaconing(List<NetworkNode> nodes, String target) {
-        // Malware: compromised node phones home to C2 with periodic small callbacks
-        // Feature signature: outbound traffic, small consistent-sized packets, same dest port
+        // Compromised node quarantined: C2 beaconing is completely blocked
+        if (isQuarantined(nodes, target)) return;
+
         for (int i = 0; i < 5; i++) {
             Packet p = new Packet();
-            p.setSource(target); // Compromised node phones home
-            p.setDest("inet-gw"); // Beaconing to external
+            p.setSource(target);
+            p.setDest("inet-gw");
             p.setProtocol("HTTPS");
             p.setSourcePort(1024 + random.nextInt(60000));
             p.setDestPort(443);
-            p.setBytes(64 + random.nextInt(128)); // Small beacon
+            p.setBytes(64 + random.nextInt(128));
             p.setLabel("ATTACK");
             flowService.receivePacket(p);
         }
     }
 
     private void generateDataExfiltration(List<NetworkNode> nodes, String target) {
-        // Exfiltration: large outbound data transfers from compromised node
-        // Feature signature: very high bytes_per_sec, large avg_packet_size
+        // Compromised node quarantined: data exfiltration is blocked
+        if (isQuarantined(nodes, target)) return;
+
         for (int i = 0; i < 10; i++) {
             Packet p = new Packet();
-            p.setSource(target); // Exfiltrating FROM this node
-            p.setDest("inet-gw"); // Sending to external
+            p.setSource(target);
+            p.setDest("inet-gw");
             p.setProtocol("HTTPS");
             p.setSourcePort(1024 + random.nextInt(60000));
             p.setDestPort(443);
-            p.setBytes(8000 + random.nextInt(7000)); // Large data chunks
+            p.setBytes(8000 + random.nextInt(7000));
             p.setLabel("ATTACK");
             flowService.receivePacket(p);
         }
     }
 
     private void generateReconnaissance(List<NetworkNode> nodes, String target) {
-        // Recon: probing from target to structural servers
-        // Feature signature: ICMP probes to multiple targets, small packets
+        if (isQuarantined(nodes, target)) return;
+
         NetworkNode src = nodes.stream().filter(n -> n.getId().equals(target)).findFirst().orElse(nodes.get(0));
             
         List<NetworkNode> victims = nodes.stream()
+            .filter(n -> !isQuarantined(nodes, n.getId()))
             .filter(n -> n.getId().contains("srv") || n.getId().contains("db") || n.getId().contains("fw"))
             .limit(5)
-            .collect(java.util.stream.Collectors.toList());
+            .toList();
             
         for (NetworkNode dst : victims) {
             Packet p = new Packet();
@@ -191,11 +213,11 @@ public class TrafficGeneratorService {
 
     private String getProtocolForType(String type) {
         return switch (type) {
-            case "SERVER" -> PROTOCOLS[random.nextInt(3)]; // TCP, UDP, HTTP
+            case "SERVER" -> PROTOCOLS[random.nextInt(3)];
             case "DATABASE" -> "TCP";
             case "IOT_DEVICE" -> random.nextBoolean() ? "UDP" : "TCP";
             case "FIREWALL", "ROUTER" -> PROTOCOLS[random.nextInt(PROTOCOLS.length)];
-            default -> "TCP"; // PC, LAPTOP
+            default -> "TCP";
         };
     }
 
@@ -210,10 +232,10 @@ public class TrafficGeneratorService {
 
     private int getTypicalBytesForType(String type) {
         return switch (type) {
-            case "IOT_DEVICE" -> 64 + random.nextInt(256);   // small IoT payloads
-            case "SERVER" -> 256 + random.nextInt(1200);      // medium web responses
-            case "DATABASE" -> 512 + random.nextInt(2000);    // query results
-            default -> 128 + random.nextInt(1000);            // general traffic
+            case "IOT_DEVICE" -> 64 + random.nextInt(256);
+            case "SERVER" -> 256 + random.nextInt(1200);
+            case "DATABASE" -> 512 + random.nextInt(2000);
+            default -> 128 + random.nextInt(1000);
         };
     }
 }

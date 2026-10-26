@@ -30,28 +30,37 @@ public class TrustService {
         List<NetworkNode> nodes = nodeRepository.findAll();
         boolean changed = false;
         
-        // Get active attacks so we can directly decay target node trust
         Map<String, String> activeAttacks = getActiveAttacks();
         
         for (NetworkNode node : nodes) {
             double oldTrust = node.getTrustScore();
             String reason = null;
 
-            // Direct trust decay for nodes under active attack
-            boolean isUnderAttack = activeAttacks.containsKey(node.getId());
+            boolean isTargetOfAttack = activeAttacks.containsKey(node.getId());
 
-            if (isUnderAttack && node.getStatus() != NodeStatus.QUARANTINED) {
-                // Mark node as UNDER_ATTACK and apply aggressive trust decay
-                node.setStatus(NodeStatus.UNDER_ATTACK);
-                double decay = 5.0; // Aggressive decay during active attack
-                node.setTrustScore(Math.max(0, node.getTrustScore() - decay));
-                reason = "Active " + activeAttacks.get(node.getId()) + " attack — trust decaying rapidly";
+            // 1. Maintain health/threat state separate from trust score
+            if (isTargetOfAttack && node.getStatus() != NodeStatus.QUARANTINED && node.getStatus() != NodeStatus.SUSPICIOUS) {
+                if (node.getStatus() != NodeStatus.UNDER_ATTACK) {
+                    node.setStatus(NodeStatus.UNDER_ATTACK);
+                    changed = true;
+                }
+            } else if (!isTargetOfAttack && node.getStatus() == NodeStatus.UNDER_ATTACK) {
+                // Threat has ceased — return to healthy
+                node.setStatus(NodeStatus.HEALTHY);
+                changed = true;
+            }
 
-                if (node.getTrustScore() < 30) {
+            // 2. Trust scoring: only decay trust for nodes generating anomalous traffic (SUSPICIOUS)
+            if (node.getStatus() == NodeStatus.SUSPICIOUS) {
+                double decay = 2.5; // Deterministic trust decay for anomalous behavior
+                node.setTrustScore(Math.max(0.0, node.getTrustScore() - decay));
+                reason = "Anomalous traffic generation detected — sustained suspicious behavior";
+
+                // State transition: Suspicious -> Quarantined
+                if (node.getTrustScore() < 30.0) {
                     node.setStatus(NodeStatus.QUARANTINED);
-                    reason = "Trust below quarantine threshold (30) — node isolated";
+                    reason = "Trust below threshold (30.0) — node quarantined from network";
 
-                    // Emit mitigation event
                     Map<String, Object> mitigationEvent = new HashMap<>();
                     mitigationEvent.put("type", "MITIGATION");
                     mitigationEvent.put("node", node.getId());
@@ -64,32 +73,10 @@ public class TrustService {
                 }
                 changed = true;
 
-            } else if (node.getStatus() == NodeStatus.SUSPICIOUS) {
-                // Trust decay for suspicious nodes — proportional to how suspicious
-                double decay = 2.5;
-                node.setTrustScore(Math.max(0, node.getTrustScore() - decay));
-                reason = "Anomalous traffic detected — sustained suspicious behavior";
-
-                if (node.getTrustScore() < 30) {
-                    node.setStatus(NodeStatus.QUARANTINED);
-                    reason = "Trust below quarantine threshold (30) — node isolated";
-
-                    // Emit mitigation event
-                    Map<String, Object> mitigationEvent = new HashMap<>();
-                    mitigationEvent.put("type", "MITIGATION");
-                    mitigationEvent.put("node", node.getId());
-                    mitigationEvent.put("action", "QUARANTINE");
-                    mitigationEvent.put("trustScore", node.getTrustScore());
-                    mitigationEvent.put("timestamp", Instant.now().toString());
-                    mitigationEvent.put("message", node.getName() + " quarantined — trust " + 
-                        String.format("%.1f", node.getTrustScore()) + " < 30 threshold");
-                    messagingTemplate.convertAndSend("/topic/events", mitigationEvent);
-                }
-                changed = true;
-            } else if (node.getStatus() == NodeStatus.HEALTHY && node.getTrustScore() < 100) {
-                // Gradual trust recovery through sustained normal behavior
-                node.setTrustScore(Math.min(100, node.getTrustScore() + 1.0));
-                if (node.getTrustScore() - oldTrust >= 5.0 || node.getTrustScore() >= 100) {
+            } else if (node.getStatus() == NodeStatus.HEALTHY && node.getTrustScore() < 100.0) {
+                // Deterministic trust recovery tied to verifiable sustained normal behavior
+                node.setTrustScore(Math.min(100.0, node.getTrustScore() + 1.0));
+                if (node.getTrustScore() - oldTrust >= 5.0 || node.getTrustScore() >= 100.0) {
                     reason = "Sustained normal behavior — trust recovering";
                 }
                 changed = true;

@@ -39,10 +39,12 @@ class FedAvgAggregator:
             return {}
             
         # Trust-Weighted tree selection:
-        # Use the model with the largest max_samples_ as the base to prevent IndexError during prediction
+        # Select base model with highest capacity
         global_model = max(models, key=lambda m: getattr(m, "max_samples_", 0))
         combined_estimators = []
         combined_features = []
+        combined_decision_path_lengths = []
+        combined_avg_path_lengths = []
         
         target_n_trees = 100  # Target number of trees in the global model
         
@@ -59,11 +61,23 @@ class FedAvgAggregator:
                 for idx in indices:
                     combined_estimators.append(model.estimators_[idx])
                     combined_features.append(model.estimators_features_[idx])
+                    if hasattr(model, "_decision_path_lengths") and idx < len(model._decision_path_lengths):
+                        combined_decision_path_lengths.append(model._decision_path_lengths[idx])
+                    if hasattr(model, "_average_path_length_per_tree") and idx < len(model._average_path_length_per_tree):
+                        combined_avg_path_lengths.append(model._average_path_length_per_tree[idx])
                 
         if combined_estimators:
             global_model.estimators_ = combined_estimators
             global_model.estimators_features_ = combined_features
             global_model.n_estimators = len(combined_estimators)
+            if combined_decision_path_lengths:
+                global_model._decision_path_lengths = combined_decision_path_lengths
+            if combined_avg_path_lengths:
+                global_model._average_path_length_per_tree = combined_avg_path_lengths
+            if hasattr(global_model, "offset_"):
+                global_model.offset_ = float(sum(getattr(m, "offset_", -0.5) * w for m, w in zip(models, valid_weights)))
+            if hasattr(global_model, "_max_samples"):
+                global_model._max_samples = max(getattr(m, "_max_samples", 256) for m in models)
             
         # Record round metadata
         self.round_history.append({

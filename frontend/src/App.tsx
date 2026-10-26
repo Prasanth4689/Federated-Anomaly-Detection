@@ -54,6 +54,8 @@ export default function App() {
   const [attackType, setAttackType]     = useState('DDOS');
   const [targetNode, setTargetNode]     = useState('');
   const [activeAttacks, setActiveAttacks] = useState<Record<string, string>>({});
+  const [initialRound, setInitialRound] = useState(0);
+  const [initialAccuracy, setInitialAccuracy] = useState<number | null>(null);
 
   const { packets, flows, events, nodeUpdates, simulationState } = useWebSocket();
 
@@ -63,6 +65,19 @@ export default function App() {
       .then(r => r.json())
       .then((data: any[]) => setNodes(data.map(formatNode)))
       .catch(console.error);
+
+    fetch(`${API_URL}/api/federated/rounds`)
+      .then(r => r.json())
+      .then((rounds: any[]) => {
+        if (rounds && rounds.length > 0) {
+          const lastRound = rounds[rounds.length - 1];
+          setInitialRound(lastRound.roundNumber || rounds.length);
+          if (lastRound.accuracyAfter) {
+            setInitialAccuracy(lastRound.accuracyAfter);
+          }
+        }
+      })
+      .catch(() => {});
   }, []);
 
   // Sync active attacks from events
@@ -137,17 +152,17 @@ export default function App() {
   // ── Derived data ───────────────────────────────────────────────────────────
   const fedRoundEvents  = useMemo(() => events.filter(e => e.type === 'FED_ROUND_COMPLETE'), [events]);
   const fedRounds       = fedRoundEvents.length;
-  const currentRound    = fedRoundEvents.length > 0 ? (fedRoundEvents[0].version ?? fedRounds) : 0;
+  const currentRound    = fedRoundEvents.length > 0 ? (fedRoundEvents[0].version ?? fedRounds) : initialRound;
   const anomalyCount    = useMemo(() => events.filter(e => e.type === 'ANOMALY_DETECTED').length, [events]);
   const accuracy = useMemo(() => {
     if (fedRoundEvents.length > 0 && fedRoundEvents[0].accuracy) {
       return fedRoundEvents[0].accuracy;
     }
-    let base = 82.5;
-    if (fedRounds > 0) base += Math.min(16.5, Math.log10(fedRounds + 1) * 8);
-    const penalty = Math.min(anomalyCount * 0.1, 5);
-    return Math.max(0, Math.min(99.9, base - penalty));
-  }, [fedRoundEvents, fedRounds, anomalyCount]);
+    if (initialAccuracy !== null) {
+      return initialAccuracy;
+    }
+    return 92.5;
+  }, [fedRoundEvents, initialAccuracy]);
 
   const networkLoad = useMemo(() => {
     if (!flows.length) return 0;
