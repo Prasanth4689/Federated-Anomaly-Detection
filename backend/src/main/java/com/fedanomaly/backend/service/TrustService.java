@@ -7,7 +7,9 @@ import com.fedanomaly.backend.repository.NetworkNodeRepository;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.HashMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.time.Instant;
 
 @Service
@@ -15,11 +17,17 @@ public class TrustService {
     private final NetworkNodeRepository nodeRepository;
     private final SimpMessagingTemplate messagingTemplate;
     private final AttackService attackService;
+    private final FlowService flowService;
 
-    public TrustService(NetworkNodeRepository nodeRepository, SimpMessagingTemplate messagingTemplate, AttackService attackService) {
+    // Track consecutive ticks without anomalies for suspicious node recovery
+    private final Map<String, Integer> cleanTickCounts = new ConcurrentHashMap<>();
+
+    public TrustService(NetworkNodeRepository nodeRepository, SimpMessagingTemplate messagingTemplate, 
+                        AttackService attackService, FlowService flowService) {
         this.nodeRepository = nodeRepository;
         this.messagingTemplate = messagingTemplate;
         this.attackService = attackService;
+        this.flowService = flowService;
     }
 
     private Map<String, String> getActiveAttacks() {
@@ -31,6 +39,7 @@ public class TrustService {
         boolean changed = false;
         
         Map<String, String> activeAttacks = getActiveAttacks();
+        Set<String> suspiciousThisTick = flowService.getAndClearActiveSuspiciousSources();
         
         for (NetworkNode node : nodes) {
             double oldTrust = node.getTrustScore();
@@ -45,33 +54,44 @@ public class TrustService {
                     changed = true;
                 }
             } else if (!isTargetOfAttack && node.getStatus() == NodeStatus.UNDER_ATTACK) {
-                // Threat has ceased — return to healthy
                 node.setStatus(NodeStatus.HEALTHY);
                 changed = true;
             }
 
-            // 2. Trust scoring: only decay trust for nodes generating anomalous traffic (SUSPICIOUS)
+            // 2. Incident Response State Machine: Suspicious behavior handling
             if (node.getStatus() == NodeStatus.SUSPICIOUS) {
-                double decay = 2.5; // Deterministic trust decay for anomalous behavior
-                node.setTrustScore(Math.max(0.0, node.getTrustScore() - decay));
-                reason = "Anomalous traffic generation detected — sustained suspicious behavior";
+                if (suspiciousThisTick.contains(node.getId())) {
+                    cleanTickCounts.put(node.getId(), 0);
+                    double decay = 2.5; // Deterministic trust decay for confirmed anomalous traffic
+                    node.setTrustScore(Math.max(0.0, node.getTrustScore() - decay));
+                    reason = "Anomalous traffic generation detected — sustained suspicious behavior";
 
-                // State transition: Suspicious -> Quarantined
-                if (node.getTrustScore() < 30.0) {
-                    node.setStatus(NodeStatus.QUARANTINED);
-                    reason = "Trust below threshold (30.0) — node quarantined from network";
+                    // Transition to Quarantined
+                    if (node.getTrustScore() < 30.0) {
+                        node.setStatus(NodeStatus.QUARANTINED);
+                        reason = "Trust below threshold (30.0) — node quarantined from network";
 
-                    Map<String, Object> mitigationEvent = new HashMap<>();
-                    mitigationEvent.put("type", "MITIGATION");
-                    mitigationEvent.put("node", node.getId());
-                    mitigationEvent.put("action", "QUARANTINE");
-                    mitigationEvent.put("trustScore", node.getTrustScore());
-                    mitigationEvent.put("timestamp", Instant.now().toString());
-                    mitigationEvent.put("message", node.getName() + " quarantined — trust " + 
-                        String.format("%.1f", node.getTrustScore()) + " < 30 threshold");
-                    messagingTemplate.convertAndSend("/topic/events", mitigationEvent);
+                        Map<String, Object> mitigationEvent = new HashMap<>();
+                        mitigationEvent.put("type", "MITIGATION");
+                        mitigationEvent.put("node", node.getId());
+                        mitigationEvent.put("action", "QUARANTINE");
+                        mitigationEvent.put("trustScore", node.getTrustScore());
+                        mitigationEvent.put("timestamp", Instant.now().toString());
+                        mitigationEvent.put("message", node.getName() + " quarantined — trust " + 
+                            String.format("%.1f", node.getTrustScore()) + " < 30 threshold");
+                        messagingTemplate.convertAndSend("/topic/events", mitigationEvent);
+                    }
+                    changed = true;
+                } else {
+                    // Node is suspicious but no anomalies occurred this tick -> start recovery sequence
+                    int cleanTicks = cleanTickCounts.compute(node.getId(), (k, v) -> v == null ? 1 : v + 1);
+                    if (cleanTicks >= 3) {
+                        node.setStatus(NodeStatus.HEALTHY);
+                        cleanTickCounts.remove(node.getId());
+                        reason = "No anomalies detected for consecutive windows — returning to Healthy";
+                        changed = true;
+                    }
                 }
-                changed = true;
 
             } else if (node.getStatus() == NodeStatus.HEALTHY && node.getTrustScore() < 100.0) {
                 // Deterministic trust recovery tied to verifiable sustained normal behavior

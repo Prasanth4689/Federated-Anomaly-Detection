@@ -9,6 +9,8 @@ import org.springframework.messaging.simp.SimpMessagingTemplate;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.Map;
+import java.util.Set;
+import java.util.HashSet;
 import java.util.UUID;
 import java.time.Instant;
 import java.util.List;
@@ -39,6 +41,9 @@ public class FlowService {
     private final AtomicLong falseNegatives = new AtomicLong(0);
     private final AtomicLong trueNegatives = new AtomicLong(0);
 
+    // Track which nodes generated significant anomalies in the most recent tick
+    private final Set<String> activeSuspiciousSources = ConcurrentHashMap.newKeySet();
+
     public FlowService(NetworkFlowRepository flowRepository, SimpMessagingTemplate messagingTemplate, 
                        com.fedanomaly.backend.repository.NetworkNodeRepository nodeRepository,
                        AttackService attackService) {
@@ -47,6 +52,12 @@ public class FlowService {
         this.nodeRepository = nodeRepository;
         this.attackService = attackService;
         this.restTemplate = new RestTemplate();
+    }
+
+    public Set<String> getAndClearActiveSuspiciousSources() {
+        Set<String> snapshot = new HashSet<>(activeSuspiciousSources);
+        activeSuspiciousSources.clear();
+        return snapshot;
     }
 
     public void receivePacket(Packet p) {
@@ -97,7 +108,6 @@ public class FlowService {
 
         // ── ML-based prediction (sole detection authority) ───────────────────
         // Group flows by DESTINATION node for anomaly detection.
-        // Anomalies are detected at the destination where attack traffic arrives.
         Map<String, List<Map<String, Object>>> nodeFlowsMap = new HashMap<>();
         Map<String, List<NetworkFlow>> nodeFlowObjects = new HashMap<>();
         
@@ -183,46 +193,50 @@ public class FlowService {
                         double maxScore = sourceMaxScores.get(attackerId);
                         Map<String, Object> bestExplanation = sourceExplanations.get(attackerId);
                         
-                        nodeRepository.findById(attackerId).ifPresent(attackerNode -> {
-                            if (attackerNode.getStatus() != NodeStatus.QUARANTINED) {
-                                attackerNode.setStatus(NodeStatus.SUSPICIOUS);
-                                nodeRepository.save(attackerNode);
-                                messagingTemplate.convertAndSend("/topic/nodes", nodeRepository.findAll());
-                                
-                                // Build rich detection event
-                                Map<String, Object> event = new HashMap<>();
-                                event.put("type", "ANOMALY_DETECTED");
-                                event.put("node", attackerId); // Visual timeline focuses on the one being punished
-                                event.put("anomalyScore", Math.round(maxScore * 10000.0) / 10000.0);
-                                event.put("anomalyCount", sourceAnomalyCount);
-                                event.put("totalFlows", flowMaps.size());
-                                event.put("timestamp", Instant.now().toString());
-                                
-                                // Add XAI explanation
-                                if (bestExplanation != null && !bestExplanation.isEmpty()) {
-                                    event.put("explanation", bestExplanation);
-                                    String topFeature = bestExplanation.keySet().iterator().next();
-                                    event.put("message", "IDS at " + nodeId + " flagged " + attackerId + 
-                                        " for abnormal " + topFeature);
-                                } else {
-                                    event.put("message", "IDS at " + nodeId + " flagged anomalous traffic from " + attackerId);
+                        // Sustained/significant anomaly threshold: flag SUSPICIOUS only on genuine attack signatures
+                        if (sourceAnomalyCount >= 2 || Math.abs(maxScore) > 0.60) {
+                            activeSuspiciousSources.add(attackerId);
+                            nodeRepository.findById(attackerId).ifPresent(attackerNode -> {
+                                if (attackerNode.getStatus() != NodeStatus.QUARANTINED) {
+                                    attackerNode.setStatus(NodeStatus.SUSPICIOUS);
+                                    nodeRepository.save(attackerNode);
+                                    messagingTemplate.convertAndSend("/topic/nodes", nodeRepository.findAll());
+                                    
+                                    // Build rich detection event
+                                    Map<String, Object> event = new HashMap<>();
+                                    event.put("type", "ANOMALY_DETECTED");
+                                    event.put("node", attackerId);
+                                    event.put("anomalyScore", Math.round(maxScore * 10000.0) / 10000.0);
+                                    event.put("anomalyCount", sourceAnomalyCount);
+                                    event.put("totalFlows", flowMaps.size());
+                                    event.put("timestamp", Instant.now().toString());
+                                    
+                                    // Add XAI explanation
+                                    if (bestExplanation != null && !bestExplanation.isEmpty()) {
+                                        event.put("explanation", bestExplanation);
+                                        String topFeature = bestExplanation.keySet().iterator().next();
+                                        event.put("message", "IDS at " + nodeId + " flagged " + attackerId + 
+                                            " for abnormal " + topFeature);
+                                    } else {
+                                        event.put("message", "IDS at " + nodeId + " flagged anomalous traffic from " + attackerId);
+                                    }
+                                    
+                                    // Add traffic context
+                                    double avgPps = flowMaps.stream()
+                                        .mapToDouble(m -> ((Number) m.get("packets_per_sec")).doubleValue())
+                                        .average().orElse(0);
+                                    double avgBps = flowMaps.stream()
+                                        .mapToDouble(m -> ((Number) m.get("bytes_per_sec")).doubleValue())
+                                        .average().orElse(0);
+                                    Map<String, Object> trafficStats = new HashMap<>();
+                                    trafficStats.put("avgPacketsPerSec", Math.round(avgPps * 10.0) / 10.0);
+                                    trafficStats.put("avgBytesPerSec", Math.round(avgBps * 10.0) / 10.0);
+                                    event.put("trafficStats", trafficStats);
+                                    
+                                    messagingTemplate.convertAndSend("/topic/events", event);
                                 }
-                                
-                                // Add traffic context
-                                double avgPps = flowMaps.stream()
-                                    .mapToDouble(m -> ((Number) m.get("packets_per_sec")).doubleValue())
-                                    .average().orElse(0);
-                                double avgBps = flowMaps.stream()
-                                    .mapToDouble(m -> ((Number) m.get("bytes_per_sec")).doubleValue())
-                                    .average().orElse(0);
-                                Map<String, Object> trafficStats = new HashMap<>();
-                                trafficStats.put("avgPacketsPerSec", Math.round(avgPps * 10.0) / 10.0);
-                                trafficStats.put("avgBytesPerSec", Math.round(avgBps * 10.0) / 10.0);
-                                event.put("trafficStats", trafficStats);
-                                
-                                messagingTemplate.convertAndSend("/topic/events", event);
-                            }
-                        });
+                            });
+                        }
                     }
                 }
             } catch (Exception e) {

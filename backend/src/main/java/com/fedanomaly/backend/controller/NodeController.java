@@ -1,6 +1,7 @@
 package com.fedanomaly.backend.controller;
 
 import com.fedanomaly.backend.model.NetworkNode;
+import com.fedanomaly.backend.model.NodeStatus;
 import com.fedanomaly.backend.repository.NetworkNodeRepository;
 import org.springframework.web.bind.annotation.*;
 import java.util.List;
@@ -41,20 +42,21 @@ public class NodeController {
         Optional<NetworkNode> nodeOpt = nodeRepository.findById(id);
         if (nodeOpt.isPresent()) {
             NetworkNode node = nodeOpt.get();
-            node.setStatus(com.fedanomaly.backend.model.NodeStatus.HEALTHY);
-            node.setTrustScore(Math.max(node.getTrustScore(), 30.0));
+            node.setStatus(NodeStatus.HEALTHY);
+            node.setTrustScore(100.0);
             nodeRepository.save(node);
             
             // Broadcast the change to the frontend immediately
             messagingTemplate.convertAndSend("/topic/nodes", nodeRepository.findAll());
         }
     }
+
     @PutMapping("/recoverAll")
     public void recoverAllNodes() {
         List<NetworkNode> nodes = nodeRepository.findAll();
         for (NetworkNode node : nodes) {
-            node.setStatus(com.fedanomaly.backend.model.NodeStatus.HEALTHY);
-            node.setTrustScore(Math.max(node.getTrustScore(), 30.0));
+            node.setStatus(NodeStatus.HEALTHY);
+            node.setTrustScore(100.0);
         }
         nodeRepository.saveAll(nodes);
         messagingTemplate.convertAndSend("/topic/nodes", nodes);

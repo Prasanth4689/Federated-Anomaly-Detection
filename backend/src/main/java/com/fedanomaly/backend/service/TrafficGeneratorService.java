@@ -22,9 +22,9 @@ public class TrafficGeneratorService {
     private static final int[] IOT_PORTS = {1883, 8883, 5683}; // MQTT, CoAP
     private static final String[] PROTOCOLS = {"TCP", "UDP", "HTTP", "HTTPS", "DNS"};
 
-    // External-profile node IDs that can act as attack sources
+    // External-profile node IDs that act as attack sources
     private static final String[] EXTERNAL_SOURCES = {"inet-gw", "vpn-gw"};
-    // Internal PCs that could be compromised
+    // Internal PCs that can act as compromised sources
     private static final String[] INTERNAL_PCS = {"dev-pc", "emp-pc-1", "emp-pc-2", "admin-pc"};
 
     public TrafficGeneratorService(NetworkNodeRepository nodeRepository, FlowService flowService, AttackService attackService) {
@@ -37,33 +37,34 @@ public class TrafficGeneratorService {
         List<NetworkNode> nodes = nodeRepository.findAll();
         if (nodes.size() < 2) return;
 
-        // Quarantined nodes cannot participate in normal traffic (quarantine restriction)
+        // Active nodes eligible for normal traffic
         List<NetworkNode> activeNodes = nodes.stream()
             .filter(n -> n.getStatus() != NodeStatus.QUARANTINED)
             .toList();
 
-        if (activeNodes.size() >= 2) {
-            // Generate normal traffic based on node profiles among non-quarantined nodes
-            int numPackets = random.nextInt(10) + 5;
-            for (int i = 0; i < numPackets; i++) {
-                NetworkNode src = activeNodes.get(random.nextInt(activeNodes.size()));
-                NetworkNode dst = activeNodes.get(random.nextInt(activeNodes.size()));
-                if (src.getId().equals(dst.getId())) continue;
+        // Fallback to all nodes if all were quarantined so the network simulation never deadlocks
+        List<NetworkNode> trafficPool = activeNodes.size() >= 2 ? activeNodes : nodes;
 
-                Packet p = new Packet();
-                p.setSource(src.getId());
-                p.setDest(dst.getId());
-                p.setProtocol(getProtocolForType(src.getType().name()));
-                p.setSourcePort(1024 + random.nextInt(60000));
-                p.setDestPort(getDestPortForType(dst.getType().name()));
-                p.setBytes(getTypicalBytesForType(src.getType().name()));
-                p.setLabel("NORMAL");
+        // Generate normal background traffic based on node profiles
+        int numPackets = random.nextInt(10) + 5;
+        for (int i = 0; i < numPackets; i++) {
+            NetworkNode src = trafficPool.get(random.nextInt(trafficPool.size()));
+            NetworkNode dst = trafficPool.get(random.nextInt(trafficPool.size()));
+            if (src.getId().equals(dst.getId())) continue;
 
-                flowService.receivePacket(p);
-            }
+            Packet p = new Packet();
+            p.setSource(src.getId());
+            p.setDest(dst.getId());
+            p.setProtocol(getProtocolForType(src.getType().name()));
+            p.setSourcePort(1024 + random.nextInt(60000));
+            p.setDestPort(getDestPortForType(dst.getType().name()));
+            p.setBytes(getTypicalBytesForType(src.getType().name()));
+            p.setLabel("NORMAL");
+
+            flowService.receivePacket(p);
         }
 
-        // Generate attack traffic — attacks targeting or originating from quarantined nodes are suppressed
+        // Generate attack traffic — runs actively whenever an attack is injected
         attackService.getActiveAttacks().forEach((target, type) -> {
             String normalised = type.toUpperCase();
             if (normalised.startsWith("DDOS")) {
@@ -82,18 +83,7 @@ public class TrafficGeneratorService {
         });
     }
 
-    private boolean isQuarantined(List<NetworkNode> nodes, String nodeId) {
-        return nodes.stream()
-            .filter(n -> n.getId().equals(nodeId))
-            .findFirst()
-            .map(n -> n.getStatus() == NodeStatus.QUARANTINED)
-            .orElse(false);
-    }
-
     private void generateDDoS(List<NetworkNode> nodes, String target) {
-        // If target is quarantined, traffic is blocked at the perimeter
-        if (isQuarantined(nodes, target)) return;
-
         for (int i = 0; i < 50; i++) {
             Packet p = new Packet();
             p.setSource(EXTERNAL_SOURCES[random.nextInt(EXTERNAL_SOURCES.length)]);
@@ -108,15 +98,7 @@ public class TrafficGeneratorService {
     }
 
     private void generatePortScan(List<NetworkNode> nodes, String target) {
-        if (isQuarantined(nodes, target)) return;
-
-        // Choose non-quarantined internal PC if available
-        List<String> activeInternal = List.of(INTERNAL_PCS).stream()
-            .filter(id -> !isQuarantined(nodes, id))
-            .toList();
-        if (activeInternal.isEmpty()) return; // All attacker PCs quarantined
-
-        String srcId = activeInternal.get(random.nextInt(activeInternal.size()));
+        String srcId = INTERNAL_PCS[random.nextInt(INTERNAL_PCS.length)];
         NetworkNode src = nodes.stream().filter(n -> n.getId().equals(srcId)).findFirst().orElse(nodes.get(0));
         
         int startPort = random.nextInt(1000);
@@ -134,8 +116,6 @@ public class TrafficGeneratorService {
     }
 
     private void generateBruteForce(List<NetworkNode> nodes, String target) {
-        if (isQuarantined(nodes, target)) return;
-
         String srcId = EXTERNAL_SOURCES[random.nextInt(EXTERNAL_SOURCES.length)];
         int destPort = random.nextBoolean() ? 22 : 3389;
         for (int i = 0; i < 30; i++) {
@@ -152,9 +132,6 @@ public class TrafficGeneratorService {
     }
 
     private void generateMalwareBeaconing(List<NetworkNode> nodes, String target) {
-        // Compromised node quarantined: C2 beaconing is completely blocked
-        if (isQuarantined(nodes, target)) return;
-
         for (int i = 0; i < 5; i++) {
             Packet p = new Packet();
             p.setSource(target);
@@ -169,9 +146,6 @@ public class TrafficGeneratorService {
     }
 
     private void generateDataExfiltration(List<NetworkNode> nodes, String target) {
-        // Compromised node quarantined: data exfiltration is blocked
-        if (isQuarantined(nodes, target)) return;
-
         for (int i = 0; i < 10; i++) {
             Packet p = new Packet();
             p.setSource(target);
@@ -186,12 +160,9 @@ public class TrafficGeneratorService {
     }
 
     private void generateReconnaissance(List<NetworkNode> nodes, String target) {
-        if (isQuarantined(nodes, target)) return;
-
         NetworkNode src = nodes.stream().filter(n -> n.getId().equals(target)).findFirst().orElse(nodes.get(0));
             
         List<NetworkNode> victims = nodes.stream()
-            .filter(n -> !isQuarantined(nodes, n.getId()))
             .filter(n -> n.getId().contains("srv") || n.getId().contains("db") || n.getId().contains("fw"))
             .limit(5)
             .toList();
