@@ -95,21 +95,20 @@ def get_feature_contributions(model, X: np.ndarray) -> list[dict]:
     if not hasattr(model, 'estimators_') or len(X) == 0:
         return []
 
+    # Batched: one score_samples call per feature for the whole batch
+    # (same values as scoring each sample separately, far fewer model passes).
+    names = FEATURE_NAMES[:X.shape[1]]
+    base_scores = model.score_samples(X)
+    impacts = np.zeros((len(X), len(names)))
+    for j in range(len(names)):
+        perturbed = X.copy()
+        perturbed[:, j] = 0  # zero out feature
+        impacts[:, j] = np.abs(base_scores - model.score_samples(perturbed))
+
     contributions = []
     for i in range(len(X)):
-        sample = X[i].reshape(1, -1)
-
-        # Get the anomaly score
-        score = float(model.score_samples(sample)[0])
-
-        # Compute feature importance via perturbation
-        feature_impacts = {}
-        for j, name in enumerate(FEATURE_NAMES[:X.shape[1]]):
-            perturbed = sample.copy()
-            perturbed[0, j] = 0  # zero out feature
-            perturbed_score = float(model.score_samples(perturbed)[0])
-            impact = abs(score - perturbed_score)
-            feature_impacts[name] = round(impact, 4)
+        score = float(base_scores[i])
+        feature_impacts = {name: round(float(impacts[i, j]), 4) for j, name in enumerate(names)}
 
         # Sort by impact (descending)
         sorted_impacts = dict(sorted(feature_impacts.items(), key=lambda x: x[1], reverse=True))

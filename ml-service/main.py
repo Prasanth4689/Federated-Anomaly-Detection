@@ -1,10 +1,6 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List, Dict, Any
-import uvicorn
-from fastapi.responses import FileResponse
-import tempfile
-import csv
 
 from models.isolation_forest import AnomalyDetector
 from federated.aggregator import FedAvgAggregator
@@ -108,16 +104,4 @@ def broadcast(req: BroadcastRequest):
         
     return {"updated_node_ids": updated_nodes}
 
-@app.get("/export")
-def export(simulation_id: str = Query(...)):
-    # Mocking database export for now
-    fd, path = tempfile.mkstemp(suffix=".csv")
-    with open(path, 'w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(["simulation_id", "flow_id", "status"])
-        writer.writerow([simulation_id, "1", "mock_data"])
-    return FileResponse(path, media_type="text/csv", filename=f"sim_{simulation_id}.csv")
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+# Flow export lives in the backend (/api/flows/export); the ML service never holds raw flows.
