@@ -10,9 +10,12 @@ public class AttackService {
     private final Map<String, String> activeAttacks = new ConcurrentHashMap<>();
     private final Map<String, Instant> attackStartTimes = new ConcurrentHashMap<>();
     private final SimpMessagingTemplate messagingTemplate;
+    private final com.fedanomaly.backend.repository.NetworkNodeRepository nodeRepository;
 
-    public AttackService(SimpMessagingTemplate messagingTemplate) {
+    public AttackService(SimpMessagingTemplate messagingTemplate,
+                         com.fedanomaly.backend.repository.NetworkNodeRepository nodeRepository) {
         this.messagingTemplate = messagingTemplate;
+        this.nodeRepository = nodeRepository;
     }
 
     public void injectAttack(String targetNode, String attackType) {
@@ -21,11 +24,19 @@ public class AttackService {
 
         // Broadcast attack start event
         Map<String, Object> event = new java.util.HashMap<>();
+        AttackPlanner.Plan plan = AttackPlanner.plan(attackType, targetNode, nodeRepository.findAll());
         event.put("type", "ATTACK_STARTED");
         event.put("target", targetNode);
         event.put("attackType", attackType);
+        // Who is the source and who is affected, per the topology-aware plan
+        event.put("role", plan.role().name());
+        event.put("sources", plan.sources().size() > 5 ? plan.sources().subList(0, 5) : plan.sources());
+        event.put("sourceCount", plan.sources().size());
+        event.put("destinations", plan.destinations());
+        event.put("service", plan.serviceName());
+        event.put("fromInternet", plan.fromInternet());
         event.put("timestamp", Instant.now().toString());
-        event.put("message", attackType + " attack launched against " + targetNode);
+        event.put("message", plan.description());
         messagingTemplate.convertAndSend("/topic/events", event);
     }
     

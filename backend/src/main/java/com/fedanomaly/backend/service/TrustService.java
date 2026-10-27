@@ -43,13 +43,18 @@ public class TrustService {
         
         Map<String, String> activeAttacks = getActiveAttacks();
         Set<String> suspiciousThisTick = flowService.getAndClearActiveSuspiciousSources();
+        Set<String> observedThisTick = flowService.getAndClearObservedSources();
         
         for (NetworkNode node : nodes) {
             double oldTrust = node.getTrustScore();
             NodeStatus oldStatus = node.getStatus();
             String reason = null;
 
-            boolean isTargetOfAttack = activeAttacks.containsKey(node.getId());
+            // Only victims of an attack are "under attack"; for malware/exfiltration/recon the
+            // selected node is the compromised source, which stays as-is until the IDS detects it
+            String attackOnNode = activeAttacks.get(node.getId());
+            boolean isTargetOfAttack = attackOnNode != null
+                && AttackPlanner.roleOf(attackOnNode) == AttackPlanner.Role.VICTIM;
 
             // 1. Maintain health/threat state separate from trust score
             if (isTargetOfAttack && node.getStatus() != NodeStatus.QUARANTINED && node.getStatus() != NodeStatus.SUSPICIOUS
@@ -105,9 +110,12 @@ public class TrustService {
                 }
 
             } else if (node.getStatus() == NodeStatus.RECOVERING) {
-                // Probation after release from quarantine: no anomalies were attributed to this
-                // node this tick (otherwise FlowService would have moved it to SUSPICIOUS).
-                node.setTrustScore(Math.min(100.0, node.getTrustScore() + 1.0));
+                // Probation: no anomalies were attributed to this node this tick (otherwise FlowService
+                // would have moved it to SUSPICIOUS). Traffic the IDS actually scored and found clean
+                // earns full credit; a silent tick earns half, so recovery needs verified clean
+                // behaviour but can never stall (bounded at twice the verified-clean duration).
+                double credit = observedThisTick.contains(node.getId()) ? 1.0 : 0.5;
+                node.setTrustScore(Math.min(100.0, node.getTrustScore() + credit));
                 changed = true;
                 if (node.getTrustScore() >= RECOVERY_TRUST_THRESHOLD) {
                     node.setStatus(NodeStatus.HEALTHY);

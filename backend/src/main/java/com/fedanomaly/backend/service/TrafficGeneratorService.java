@@ -7,6 +7,7 @@ import com.fedanomaly.backend.model.Packet;
 import com.fedanomaly.backend.repository.NetworkNodeRepository;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -33,15 +34,8 @@ public class TrafficGeneratorService {
     private static final int[] IOT_PORTS = {1883, 8883, 5683}; // MQTT, CoAP
     private static final String[] PROTOCOLS = {"TCP", "UDP", "HTTP", "HTTPS", "DNS"};
 
-    // External-profile node IDs that act as attack sources
-    // External attacker hosts live outside the network (ids start with "ext-"). Their traffic
-    // enters via Internet Gateway -> Firewall -> Core Switch. Each attack campaign gets its own
-    // hosts (a DDoS botnet, or one brute-force host) from documentation IP ranges.
-    private static final int BOTNET_SIZE = 160;  // hosts available to one DDoS campaign
+    // External attacker hosts (ids "ext-<ip>", chosen by AttackPlanner) enter via the perimeter
     private static final int BOTNET_WAVE = 8;    // hosts sending at once; blocked hosts are replaced
-    private final java.util.Map<String, List<String>> campaignSources = new java.util.HashMap<>();
-    // Internal PCs that can act as compromised sources
-    private static final String[] INTERNAL_PCS = {"dev-pc", "emp-pc-1", "emp-pc-2", "admin-pc"};
 
     public TrafficGeneratorService(NetworkNodeRepository nodeRepository, FlowService flowService, AttackService attackService) {
         this.nodeRepository = nodeRepository;
@@ -85,127 +79,70 @@ public class TrafficGeneratorService {
             emit(p);
         }
 
-        // Generate attack traffic — runs actively whenever an attack is injected
-        // Forget attacker hosts of campaigns that have ended
-        campaignSources.keySet().removeIf(k -> !attackService.getActiveAttacks().containsKey(k.substring(k.indexOf(':') + 1)));
-
-        attackService.getActiveAttacks().forEach((target, type) -> {
-            String normalised = type.toUpperCase();
-            if (normalised.startsWith("DDOS")) {
-                generateDDoS(nodes, target);
-            } else if (normalised.startsWith("PORT")) {
-                generatePortScan(nodes, target);
-            } else if (normalised.startsWith("BRUTE")) {
-                generateBruteForce(nodes, target);
-            } else if (normalised.startsWith("MALWARE")) {
-                generateMalwareBeaconing(nodes, target);
-            } else if (normalised.startsWith("DATA") || normalised.startsWith("EXFIL")) {
-                generateDataExfiltration(nodes, target);
-            } else if (normalised.startsWith("RECON")) {
-                generateReconnaissance(nodes, target);
+        // Attack traffic follows the deterministic, topology-aware plan for each active attack
+        for (Map.Entry<String, String> attack : attackService.getActiveAttacks().entrySet()) {
+            AttackPlanner.Plan plan = AttackPlanner.plan(attack.getValue(), attack.getKey(), nodes);
+            switch (plan.attackType()) {
+                case "DDOS" -> generateDDoS(plan);
+                case "PORT" -> generatePortScan(plan);
+                case "BRUTE" -> generateBruteForce(plan);
+                case "MALWARE" -> generateOutbound(plan, 5, 64, 128);       // small periodic beacons
+                case "EXFIL" -> generateOutbound(plan, 10, 8000, 7000);     // large uploads
+                case "RECON" -> generateReconnaissance(plan);
+                default -> { }
             }
-        });
-    }
-
-    private void generateDDoS(List<NetworkNode> nodes, String target) {
-        // Current wave: the first hosts of the botnet that the firewall has not blocked yet
-        List<String> wave = externalHosts("DDOS", target, BOTNET_SIZE, "198.51.100.").stream()
-            .filter(h -> !flowService.isBlockedExternal(h))
-            .limit(BOTNET_WAVE)
-            .toList();
-        for (int i = 0; i < 50; i++) {
-            Packet p = new Packet();
-            if (wave.isEmpty()) return; // whole botnet blocked by the firewall
-            p.setSource(wave.get(random.nextInt(wave.size())));
-            p.setDest(target);
-            p.setProtocol(random.nextBoolean() ? "TCP" : "UDP");
-            p.setSourcePort(1024 + random.nextInt(60000));
-            p.setDestPort(80);
-            p.setBytes(32 + random.nextInt(32));
-            p.setLabel("ATTACK");
-            emit(p);
         }
     }
 
-    private void generatePortScan(List<NetworkNode> nodes, String target) {
-        String srcId = INTERNAL_PCS[random.nextInt(INTERNAL_PCS.length)];
-        NetworkNode src = nodes.stream().filter(n -> n.getId().equals(srcId)).findFirst().orElse(nodes.get(0));
-        
+    private Packet attackPacket(String src, String dst, String protocol, int destPort, int bytes) {
+        Packet p = new Packet();
+        p.setSource(src);
+        p.setDest(dst);
+        p.setProtocol(protocol);
+        p.setSourcePort(1024 + random.nextInt(60000));
+        p.setDestPort(destPort);
+        p.setBytes(bytes);
+        p.setLabel("ATTACK"); // simulation ground truth only; never sent to the model
+        return p;
+    }
+
+    private void generateDDoS(AttackPlanner.Plan plan) {
+        // External botnets attack in waves; hosts the firewall has blocked are replaced by the next ones
+        List<String> senders = plan.fromInternet()
+            ? plan.sources().stream().filter(h -> !flowService.isBlockedExternal(h)).limit(BOTNET_WAVE).toList()
+            : plan.sources();
+        if (senders.isEmpty()) return; // fully mitigated
+        for (int i = 0; i < 50; i++) {
+            String src = senders.get(random.nextInt(senders.size()));
+            emit(attackPacket(src, plan.target(), random.nextBoolean() ? "TCP" : "UDP", plan.servicePort(), 32 + random.nextInt(32)));
+        }
+    }
+
+    private void generatePortScan(AttackPlanner.Plan plan) {
+        String scanner = plan.sources().get(0);
         int startPort = random.nextInt(1000);
         for (int port = startPort; port < startPort + 100; port++) {
-            Packet p = new Packet();
-            p.setSource(src.getId());
-            p.setDest(target);
-            p.setProtocol("TCP");
-            p.setSourcePort(1024 + random.nextInt(60000));
-            p.setDestPort(port);
-            p.setBytes(40 + random.nextInt(24));
-            p.setLabel("ATTACK");
-            emit(p);
+            emit(attackPacket(scanner, plan.target(), "TCP", port, 40 + random.nextInt(24)));
         }
     }
 
-    private void generateBruteForce(List<NetworkNode> nodes, String target) {
-        String srcId = externalHosts("BRUTE", target, 1, "203.0.113.").get(0);
-        int destPort = random.nextBoolean() ? 22 : 3389;
+    private void generateBruteForce(AttackPlanner.Plan plan) {
+        String attacker = plan.sources().get(0);
         for (int i = 0; i < 30; i++) {
-            Packet p = new Packet();
-            p.setSource(srcId);
-            p.setDest(target);
-            p.setProtocol("TCP");
-            p.setSourcePort(1024 + random.nextInt(60000));
-            p.setDestPort(destPort);
-            p.setBytes(128 + random.nextInt(256));
-            p.setLabel("ATTACK");
-            emit(p);
+            emit(attackPacket(attacker, plan.target(), "TCP", plan.servicePort(), 128 + random.nextInt(256)));
         }
     }
 
-    private void generateMalwareBeaconing(List<NetworkNode> nodes, String target) {
-        for (int i = 0; i < 5; i++) {
-            Packet p = new Packet();
-            p.setSource(target);
-            p.setDest("inet-gw");
-            p.setProtocol("HTTPS");
-            p.setSourcePort(1024 + random.nextInt(60000));
-            p.setDestPort(443);
-            p.setBytes(64 + random.nextInt(128));
-            p.setLabel("ATTACK");
-            emit(p);
+    private void generateOutbound(AttackPlanner.Plan plan, int count, int minBytes, int spread) {
+        for (int i = 0; i < count; i++) {
+            emit(attackPacket(plan.target(), plan.destinations().get(0), "HTTPS", plan.servicePort(), minBytes + random.nextInt(spread)));
         }
     }
 
-    private void generateDataExfiltration(List<NetworkNode> nodes, String target) {
-        for (int i = 0; i < 10; i++) {
-            Packet p = new Packet();
-            p.setSource(target);
-            p.setDest("inet-gw");
-            p.setProtocol("HTTPS");
-            p.setSourcePort(1024 + random.nextInt(60000));
-            p.setDestPort(443);
-            p.setBytes(8000 + random.nextInt(7000));
-            p.setLabel("ATTACK");
-            emit(p);
-        }
-    }
-
-    private void generateReconnaissance(List<NetworkNode> nodes, String target) {
-        NetworkNode src = nodes.stream().filter(n -> n.getId().equals(target)).findFirst().orElse(nodes.get(0));
-            
-        List<NetworkNode> victims = nodes.stream()
-            .filter(n -> n.getId().contains("srv") || n.getId().contains("db") || n.getId().contains("fw"))
-            .limit(5)
-            .toList();
-            
-        for (NetworkNode dst : victims) {
-            Packet p = new Packet();
-            p.setSource(src.getId());
-            p.setDest(dst.getId());
-            p.setProtocol("ICMP");
+    private void generateReconnaissance(AttackPlanner.Plan plan) {
+        for (String dst : plan.destinations()) {
+            Packet p = attackPacket(plan.target(), dst, "ICMP", random.nextBoolean() ? 80 : 443, 64);
             p.setSourcePort(0);
-            p.setDestPort(random.nextBoolean() ? 80 : 443);
-            p.setBytes(64);
-            p.setLabel("ATTACK");
             emit(p);
         }
     }
@@ -222,14 +159,6 @@ public class TrafficGeneratorService {
         }
         p.setTimestampMs(windowStartMs + random.nextInt(WINDOW_MS));
         flowService.receivePacket(p);
-    }
-
-    private List<String> externalHosts(String kind, String target, int count, String prefix) {
-        return campaignSources.computeIfAbsent(kind + ":" + target, k -> {
-            java.util.Set<String> hosts = new java.util.LinkedHashSet<>();
-            while (hosts.size() < count) hosts.add("ext-" + prefix + (2 + random.nextInt(250)));
-            return new java.util.ArrayList<>(hosts);
-        });
     }
 
     public long getBlockedPackets() {
