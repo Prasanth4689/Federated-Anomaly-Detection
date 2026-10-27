@@ -46,6 +46,10 @@ public class FlowService {
     private final AtomicLong falseNegatives = new AtomicLong(0);
     private final AtomicLong trueNegatives = new AtomicLong(0);
 
+    // External hosts blocked at the perimeter firewall after the ML flagged them
+    private final Set<String> blockedExternal = ConcurrentHashMap.newKeySet();
+    private volatile long lastMlWarningMs = 0;
+
     // Track which nodes generated significant anomalies in the most recent tick
     private final Set<String> activeSuspiciousSources = ConcurrentHashMap.newKeySet();
 
@@ -56,7 +60,7 @@ public class FlowService {
         this.messagingTemplate = messagingTemplate;
         this.nodeRepository = nodeRepository;
         this.attackService = attackService;
-        this.restTemplate = new RestTemplate();
+        this.restTemplate = MlHttp.restTemplate(10_000); // never let a slow ML call freeze a tick
     }
 
     public Set<String> getAndClearActiveSuspiciousSources() {
@@ -67,6 +71,11 @@ public class FlowService {
 
     public void startNewSimulation() {
         simulationId = UUID.randomUUID();
+        blockedExternal.clear();
+    }
+
+    public boolean isBlockedExternal(String source) {
+        return source != null && blockedExternal.contains(source);
     }
 
     public UUID getSimulationId() {
@@ -215,6 +224,33 @@ public class FlowService {
                         // Sustained/significant anomaly threshold: >=4 anomalous flows from one source in a
                         // window, or one extreme outlier (IF scores are negative; lower = more anomalous).
                         if (sourceAnomalyCount >= 4 || maxScore < -0.72) {
+                            if (attackerId.startsWith("ext-")) {
+                                // External host: not a federated node, so no trust/quarantine.
+                                // Perimeter response: the firewall blocks its traffic.
+                                if (blockedExternal.add(attackerId)) {
+                                    Map<String, Object> det = new HashMap<>();
+                                    det.put("type", "ANOMALY_DETECTED");
+                                    det.put("node", attackerId);
+                                    det.put("anomalyScore", Math.round(maxScore * 10000.0) / 10000.0);
+                                    det.put("anomalyCount", sourceAnomalyCount);
+                                    det.put("timestamp", Instant.now().toString());
+                                    if (bestExplanation != null && !bestExplanation.isEmpty()) {
+                                        det.put("explanation", bestExplanation);
+                                    }
+                                    det.put("message", "IDS at " + nodeId + " flagged external host " + attackerId.substring(4));
+                                    messagingTemplate.convertAndSend("/topic/events", det);
+                                    Map<String, Object> block = new HashMap<>();
+                                    block.put("type", "MITIGATION");
+                                    block.put("node", attackerId);
+                                    block.put("action", "FIREWALL_BLOCK");
+                                    block.put("anomalyScore", Math.round(maxScore * 10000.0) / 10000.0);
+                                    block.put("anomalyCount", sourceAnomalyCount);
+                                    block.put("timestamp", Instant.now().toString());
+                                    block.put("message", "Main Firewall blocked external host " + attackerId.substring(4));
+                                    messagingTemplate.convertAndSend("/topic/events", block);
+                                }
+                                continue;
+                            }
                             activeSuspiciousSources.add(attackerId);
                             nodeRepository.findById(attackerId).ifPresent(attackerNode -> {
                                 if (attackerNode.getStatus() != NodeStatus.QUARANTINED) {
@@ -260,7 +296,16 @@ public class FlowService {
                     }
                 }
             } catch (Exception e) {
-                // ML service down or model not trained yet — no detection possible
+                // ML service down: no detection possible. Say so (rate-limited) instead of failing silently.
+                long now = System.currentTimeMillis();
+                if (now - lastMlWarningMs > 30_000) {
+                    lastMlWarningMs = now;
+                    Map<String, Object> warn = new HashMap<>();
+                    warn.put("type", "ML_SERVICE_UNREACHABLE");
+                    warn.put("timestamp", Instant.now().toString());
+                    warn.put("message", "ML service unreachable at " + mlServiceUrl + " — no anomaly detection: " + e.getMessage());
+                    messagingTemplate.convertAndSend("/topic/events", warn);
+                }
             }
         }
         

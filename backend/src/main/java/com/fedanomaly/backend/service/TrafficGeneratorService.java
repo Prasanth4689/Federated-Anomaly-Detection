@@ -34,7 +34,12 @@ public class TrafficGeneratorService {
     private static final String[] PROTOCOLS = {"TCP", "UDP", "HTTP", "HTTPS", "DNS"};
 
     // External-profile node IDs that act as attack sources
-    private static final String[] EXTERNAL_SOURCES = {"inet-gw", "vpn-gw"};
+    // External attacker hosts live outside the network (ids start with "ext-"). Their traffic
+    // enters via Internet Gateway -> Firewall -> Core Switch. Each attack campaign gets its own
+    // hosts (a DDoS botnet, or one brute-force host) from documentation IP ranges.
+    private static final int BOTNET_SIZE = 160;  // hosts available to one DDoS campaign
+    private static final int BOTNET_WAVE = 8;    // hosts sending at once; blocked hosts are replaced
+    private final java.util.Map<String, List<String>> campaignSources = new java.util.HashMap<>();
     // Internal PCs that can act as compromised sources
     private static final String[] INTERNAL_PCS = {"dev-pc", "emp-pc-1", "emp-pc-2", "admin-pc"};
 
@@ -81,6 +86,9 @@ public class TrafficGeneratorService {
         }
 
         // Generate attack traffic — runs actively whenever an attack is injected
+        // Forget attacker hosts of campaigns that have ended
+        campaignSources.keySet().removeIf(k -> !attackService.getActiveAttacks().containsKey(k.substring(k.indexOf(':') + 1)));
+
         attackService.getActiveAttacks().forEach((target, type) -> {
             String normalised = type.toUpperCase();
             if (normalised.startsWith("DDOS")) {
@@ -100,9 +108,15 @@ public class TrafficGeneratorService {
     }
 
     private void generateDDoS(List<NetworkNode> nodes, String target) {
+        // Current wave: the first hosts of the botnet that the firewall has not blocked yet
+        List<String> wave = externalHosts("DDOS", target, BOTNET_SIZE, "198.51.100.").stream()
+            .filter(h -> !flowService.isBlockedExternal(h))
+            .limit(BOTNET_WAVE)
+            .toList();
         for (int i = 0; i < 50; i++) {
             Packet p = new Packet();
-            p.setSource(EXTERNAL_SOURCES[random.nextInt(EXTERNAL_SOURCES.length)]);
+            if (wave.isEmpty()) return; // whole botnet blocked by the firewall
+            p.setSource(wave.get(random.nextInt(wave.size())));
             p.setDest(target);
             p.setProtocol(random.nextBoolean() ? "TCP" : "UDP");
             p.setSourcePort(1024 + random.nextInt(60000));
@@ -132,7 +146,7 @@ public class TrafficGeneratorService {
     }
 
     private void generateBruteForce(List<NetworkNode> nodes, String target) {
-        String srcId = EXTERNAL_SOURCES[random.nextInt(EXTERNAL_SOURCES.length)];
+        String srcId = externalHosts("BRUTE", target, 1, "203.0.113.").get(0);
         int destPort = random.nextBoolean() ? 22 : 3389;
         for (int i = 0; i < 30; i++) {
             Packet p = new Packet();
@@ -201,12 +215,21 @@ public class TrafficGeneratorService {
      * packets from or to a quarantined node are dropped (the node is isolated).
      */
     private void emit(Packet p) {
-        if (quarantinedIds.contains(p.getSource()) || quarantinedIds.contains(p.getDest())) {
+        if (quarantinedIds.contains(p.getSource()) || quarantinedIds.contains(p.getDest())
+                || flowService.isBlockedExternal(p.getSource())) {
             blockedPackets++;
             return;
         }
         p.setTimestampMs(windowStartMs + random.nextInt(WINDOW_MS));
         flowService.receivePacket(p);
+    }
+
+    private List<String> externalHosts(String kind, String target, int count, String prefix) {
+        return campaignSources.computeIfAbsent(kind + ":" + target, k -> {
+            java.util.Set<String> hosts = new java.util.LinkedHashSet<>();
+            while (hosts.size() < count) hosts.add("ext-" + prefix + (2 + random.nextInt(250)));
+            return new java.util.ArrayList<>(hosts);
+        });
     }
 
     public long getBlockedPackets() {

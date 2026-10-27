@@ -37,7 +37,7 @@ public class FederatedLearningService {
         this.roundRepository = roundRepository;
         this.flowService = flowService;
         this.messagingTemplate = messagingTemplate;
-        this.restTemplate = new RestTemplate();
+        this.restTemplate = MlHttp.restTemplate(30_000);
     }
 
     public void runFederatedRound() {
