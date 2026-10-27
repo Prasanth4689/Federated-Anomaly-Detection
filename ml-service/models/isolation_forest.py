@@ -38,8 +38,9 @@ class AnomalyDetector:
             # Return zeros/ones if not fitted to avoid crashing
             return np.ones(len(X)), np.zeros(len(X))
 
-        preds = self.model.predict(X)
+        # One model pass: same rule as IsolationForest.predict (score - offset_ < 0 -> anomaly)
         scores = self.model.score_samples(X)
+        preds = np.where(scores - self.model.offset_ < 0, -1, 1)
         return preds, scores
 
     def get_params(self) -> dict:

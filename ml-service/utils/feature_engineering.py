@@ -95,15 +95,16 @@ def get_feature_contributions(model, X: np.ndarray) -> list[dict]:
     if not hasattr(model, 'estimators_') or len(X) == 0:
         return []
 
-    # Batched: one score_samples call per feature for the whole batch
-    # (same values as scoring each sample separately, far fewer model passes).
+    # Batched: every perturbed copy (one per feature, that feature zeroed) is scored in a
+    # single score_samples call. Same values as scoring each sample separately; each model
+    # call has a fixed ~20 ms overhead, so this keeps explanations cheap.
     names = FEATURE_NAMES[:X.shape[1]]
     base_scores = model.score_samples(X)
-    impacts = np.zeros((len(X), len(names)))
+    perturbed = np.repeat(X[np.newaxis, :, :], len(names), axis=0)  # (features, rows, cols)
     for j in range(len(names)):
-        perturbed = X.copy()
-        perturbed[:, j] = 0  # zero out feature
-        impacts[:, j] = np.abs(base_scores - model.score_samples(perturbed))
+        perturbed[j, :, j] = 0  # zero out feature j
+    pert_scores = model.score_samples(perturbed.reshape(-1, X.shape[1])).reshape(len(names), len(X))
+    impacts = np.abs(base_scores[np.newaxis, :] - pert_scores).T  # (rows, features)
 
     contributions = []
     for i in range(len(X)):

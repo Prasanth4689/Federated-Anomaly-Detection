@@ -70,7 +70,12 @@ def predict(req: PredictRequest):
     contributions = []
     if model.is_fitted:
         from utils.feature_engineering import get_feature_contributions
-        contributions = get_feature_contributions(model.model, X)
+        # Explanations are only used for flagged flows, so only compute them there
+        anomalous = [i for i in range(len(X)) if predictions[i] == -1]
+        contributions = [{} for _ in range(len(X))]
+        if anomalous:
+            for i, c in zip(anomalous, get_feature_contributions(model.model, X[anomalous])):
+                contributions[i] = c
     
     result = []
     for i, flow in enumerate(req.flow_data):
