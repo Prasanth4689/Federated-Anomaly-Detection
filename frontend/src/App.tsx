@@ -56,16 +56,32 @@ export default function App() {
   const [activeAttacks, setActiveAttacks] = useState<Record<string, string>>({});
   const [initialRound, setInitialRound] = useState(0);
   const [initialAccuracy, setInitialAccuracy] = useState<number | null>(null);
+  const [backendReady, setBackendReady] = useState(false);
 
   const { packets, flows, events, nodeUpdates, simulationState } = useWebSocket();
 
   // ── Bootstrap ──────────────────────────────────────────────────────────────
+  // The hosted backend sleeps when idle and takes a while to wake, so keep retrying
+  // instead of giving up after one failed request (which left the page empty).
   useEffect(() => {
-    fetch(`${API_URL}/api/nodes`)
-      .then(r => r.json())
-      .then((data: any[]) => setNodes(data.map(formatNode)))
-      .catch(console.error);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const loadNodes = () => {
+      fetch(`${API_URL}/api/nodes`)
+        .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+        .then((data: any[]) => {
+          if (cancelled) return;
+          setNodes(data.map(formatNode));
+          setBackendReady(true);
+        })
+        .catch(() => { if (!cancelled) timer = setTimeout(loadNodes, 5000); });
+    };
+    loadNodes();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, []);
 
+  useEffect(() => {
+    if (!backendReady) return;
     fetch(`${API_URL}/api/federated/rounds`)
       .then(r => r.json())
       .then((rounds: any[]) => {
@@ -78,7 +94,7 @@ export default function App() {
         }
       })
       .catch(() => {});
-  }, []);
+  }, [backendReady]);
 
   // Sync active attacks from events
   useEffect(() => {
@@ -96,6 +112,7 @@ export default function App() {
   }, [events]);
 
   useEffect(() => {
+    if (!backendReady) return;
     fetch(`${API_URL}/api/attacks/active`)
       .then(r => r.json())
       .then(setActiveAttacks)
@@ -108,7 +125,7 @@ export default function App() {
         if (s?.speed) setSimSpeed(s.speed);
       })
       .catch(() => {});
-  }, []);
+  }, [backendReady]);
 
   // ── Live updates ───────────────────────────────────────────────────────────
   useEffect(() => {
@@ -315,6 +332,11 @@ export default function App() {
 
       {/* ── Main Canvas Area ── */}
       <main className="flex-1 flex overflow-hidden relative">
+        {!backendReady && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 px-4 py-2 rounded-lg border border-amber-500/40 bg-amber-900/30 text-amber-300 text-xs font-mono shadow-lg">
+            Connecting to backend… the free server sleeps when idle and can take 1–3 minutes to wake.
+          </div>
+        )}
 
         {/* Center Layer: Topology & Traffic Flow */}
         <section className="flex-1 relative border-r border-soc-border bg-[#0a0e17]">
