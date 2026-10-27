@@ -1,12 +1,96 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+import base64
+import hashlib
+import os
+import pickle
+import time
 
 from models.isolation_forest import AnomalyDetector
 from federated.aggregator import FedAvgAggregator
-from utils.feature_engineering import extract_features
+from utils.feature_engineering import extract_features, get_feature_contributions
 
 app = FastAPI(title="ML Service")
+
+# Saved model state survives restarts. On hosts with an ephemeral disk (e.g. Render's free
+# plan) point ML_STATE_PATH at a persistent disk, otherwise the file is lost on redeploy.
+STATE_PATH = os.environ.get(
+    "ML_STATE_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "ml_state.pkl"))
+
+# State
+local_models: Dict[str, AnomalyDetector] = {}      # deployed per-node models (run the global version)
+pending_models: Dict[str, AnomalyDetector] = {}    # locally trained candidates of the round in progress
+aggregator = FedAvgAggregator()
+global_model = AnomalyDetector()
+model_checksum: Optional[str] = None
+saved_at: Optional[str] = None
+
+
+def _checksum(params: dict) -> str:
+    return hashlib.sha256(params["model_b64"].encode("utf-8")).hexdigest()[:16]
+
+
+def save_state() -> bool:
+    """Atomically write the current global model, version and per-node models to disk."""
+    global saved_at
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    state = {
+        "model_version": aggregator.model_version,
+        "model_checksum": model_checksum,
+        "global_params": global_model.get_params(),
+        "local_models": local_models,
+        "saved_at": stamp,
+    }
+    try:
+        os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
+        tmp = STATE_PATH + ".tmp"
+        with open(tmp, "wb") as f:
+            pickle.dump(state, f)
+        os.replace(tmp, STATE_PATH)  # the previous file stays intact if anything above fails
+        saved_at = stamp
+        return True
+    except Exception as e:
+        print(f"WARNING: could not save ML state to {STATE_PATH}: {e}", flush=True)
+        return False
+
+
+def load_state() -> None:
+    """Load the saved model at startup instead of starting from an empty model."""
+    global model_checksum, saved_at
+    if not os.path.exists(STATE_PATH):
+        print(f"No saved ML state at {STATE_PATH}; starting without a global model", flush=True)
+        return
+    try:
+        with open(STATE_PATH, "rb") as f:
+            state = pickle.load(f)
+        params = state["global_params"]
+        if params and _checksum(params) != state["model_checksum"]:
+            raise ValueError("checksum mismatch")
+        if params:
+            global_model.set_params(params)
+        local_models.clear()
+        local_models.update(state["local_models"])
+        aggregator.model_version = int(state["model_version"])
+        model_checksum = state["model_checksum"]
+        saved_at = state.get("saved_at")
+        print(f"Loaded ML state: model v{aggregator.model_version} checksum={model_checksum} "
+              f"nodes={len(local_models)}", flush=True)
+    except Exception as e:
+        print(f"WARNING: saved ML state at {STATE_PATH} is unreadable ({e}); starting without it", flush=True)
+
+
+load_state()
+
+
+def model_info() -> dict:
+    return {
+        "model_version": aggregator.model_version,
+        "model_checksum": model_checksum,
+        "saved_at": saved_at,
+        "nodes": sorted(local_models.keys()),
+    }
+
 
 @app.get("/")
 def home():
@@ -14,12 +98,11 @@ def home():
 
 @app.get("/health")
 def health():
-    return {"status": "healthy"}
+    return {"status": "healthy", "model_version": aggregator.model_version, "model_checksum": model_checksum}
 
-# State
-local_models: Dict[str, AnomalyDetector] = {}
-aggregator = FedAvgAggregator()
-global_model = AnomalyDetector()
+@app.get("/model")
+def model():
+    return model_info()
 
 class TrainRequest(BaseModel):
     node_id: str
@@ -32,51 +115,58 @@ class PredictRequest(BaseModel):
 class FedAvgRequest(BaseModel):
     client_models: List[Dict[str, Any]]
     weights: List[float]
+    base_version: int = 0  # latest version the caller has recorded; versions never go backwards
 
 class BroadcastRequest(BaseModel):
     global_model_params: Dict[str, Any]
 
 @app.post("/train")
 def train(req: TrainRequest):
-    if req.node_id not in local_models:
-        local_models[req.node_id] = AnomalyDetector()
-    
-    model = local_models[req.node_id]
-    X = extract_features(req.flow_data, node_id=req.node_id, fit_scaler=True)
-    
+    # Train a candidate. The deployed model keeps serving predictions until a new global
+    # model is successfully aggregated, so a failed round never leaves a half-updated node.
+    X = extract_features(req.flow_data)
     if len(X) == 0:
         return {"model_params": {}, "training_metrics": {"n_samples": 0}}
-    
-    metrics = model.fit(X)
+
+    candidate = AnomalyDetector()
+    metrics = candidate.fit(X)
+    pending_models[req.node_id] = candidate
     return {
-        "model_params": model.get_params(),
+        "model_params": candidate.get_params(),
         "training_metrics": metrics
     }
 
 @app.post("/predict")
 def predict(req: PredictRequest):
-    if req.node_id not in local_models:
-        local_models[req.node_id] = AnomalyDetector()
-    
-    model = local_models[req.node_id]
-    X = extract_features(req.flow_data, node_id=req.node_id, fit_scaler=False)
-    
+    model = local_models.get(req.node_id)
+    if model is None:
+        model = AnomalyDetector()
+        if global_model.is_fitted:  # node without its own model yet: start from the global one
+            model.set_params(global_model.get_params())
+            model.version = aggregator.model_version
+        local_models[req.node_id] = model
+
+    X = extract_features(req.flow_data)
+
     if len(X) == 0:
-        return {"predictions": []}
-    
+        return {"predictions": [], "model_version": None}
+
     predictions, scores = model.predict(X)
-    
+
     # Get feature contributions for explainability
     contributions = []
     if model.is_fitted:
-        from utils.feature_engineering import get_feature_contributions
         # Explanations are only used for flagged flows, so only compute them there
         anomalous = [i for i in range(len(X)) if predictions[i] == -1]
         contributions = [{} for _ in range(len(X))]
         if anomalous:
-            for i, c in zip(anomalous, get_feature_contributions(model.model, X[anomalous])):
+            Xs = model.scale(X)
+            for i, c in zip(anomalous, get_feature_contributions(model.model, Xs[anomalous])):
                 contributions[i] = c
-    
+
+    # Which global model made these predictions (None: untrained or local-only model)
+    version = getattr(model, "version", None) if model.is_fitted else None
+
     result = []
     for i, flow in enumerate(req.flow_data):
         pred = {
@@ -87,26 +177,56 @@ def predict(req: PredictRequest):
         if i < len(contributions):
             pred["explanation"] = contributions[i].get("top_features", {})
         result.append(pred)
-        
-    return {"predictions": result}
+
+    return {"predictions": result, "model_version": version}
+
+
+def apply_global(params: dict, version: int) -> List[str]:
+    """Deploy the global model to every node (re-calibrating each on its own local data)."""
+    updated = {}
+    for node_id in set(local_models) | set(pending_models):
+        det = pending_models.get(node_id) or local_models[node_id]
+        det.set_params(params)
+        det.version = version
+        updated[node_id] = det
+    local_models.update(updated)
+    pending_models.clear()
+    global_model.set_params(params)
+    global_model.version = version
+    return sorted(updated)
+
 
 @app.post("/fedavg")
 def fedavg(req: FedAvgRequest):
-    global_params = aggregator.aggregate(req.client_models, req.weights)
-    global_model.set_params(global_params)
-    
+    global model_checksum
+    new_version = max(aggregator.model_version, req.base_version) + 1
+    global_params = aggregator.aggregate(req.client_models, req.weights, next_version=new_version)
+    if not global_params or "model_b64" not in global_params:
+        pending_models.clear()
+        # Last valid model and version stay in place
+        raise HTTPException(status_code=422, detail="aggregation produced no model; previous model kept")
+
+    updated = apply_global(global_params, new_version)
+    aggregator.model_version = new_version  # advanced only after the model is in place
+    model_checksum = _checksum(global_params)
+    persisted = save_state()
+
     return {
         "global_model_params": global_params,
-        "model_version": aggregator.model_version
+        "model_version": new_version,
+        "model_checksum": model_checksum,
+        "updated_node_ids": updated,
+        "persisted": persisted,
     }
 
 @app.post("/broadcast")
 def broadcast(req: BroadcastRequest):
-    updated_nodes = []
-    for node_id, model in local_models.items():
-        model.set_params(req.global_model_params)
-        updated_nodes.append(node_id)
-        
-    return {"updated_node_ids": updated_nodes}
+    # /fedavg already deploys the new model to every node; this re-applies given params
+    # (kept for API compatibility) without changing the version.
+    if "model_b64" not in req.global_model_params:
+        return {"updated_node_ids": []}
+    updated = apply_global(req.global_model_params, aggregator.model_version)
+    save_state()
+    return {"updated_node_ids": updated}
 
 # Flow export lives in the backend (/api/flows/export); the ML service never holds raw flows.

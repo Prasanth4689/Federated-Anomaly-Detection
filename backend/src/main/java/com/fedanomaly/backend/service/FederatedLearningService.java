@@ -23,6 +23,7 @@ public class FederatedLearningService {
     private final FlowService flowService;
     private final SimpMessagingTemplate messagingTemplate;
     private final RestTemplate restTemplate;
+    private final MlWarmupService mlWarmupService;
     
     @org.springframework.beans.factory.annotation.Value("${ML_SERVICE_URL:http://localhost:5000}")
     private String ML_SERVICE_URL;
@@ -31,13 +32,63 @@ public class FederatedLearningService {
                                   NetworkNodeRepository nodeRepository,
                                   FederatedRoundRepository roundRepository,
                                   FlowService flowService,
-                                  SimpMessagingTemplate messagingTemplate) {
+                                  SimpMessagingTemplate messagingTemplate,
+                                  MlWarmupService mlWarmupService) {
         this.flowRepository = flowRepository;
         this.nodeRepository = nodeRepository;
         this.roundRepository = roundRepository;
         this.flowService = flowService;
         this.messagingTemplate = messagingTemplate;
         this.restTemplate = MlHttp.restTemplate(30_000);
+        this.mlWarmupService = mlWarmupService;
+    }
+
+    /** After a restart, keep evaluating the current model from its persisted counts. */
+    @org.springframework.context.event.EventListener(org.springframework.boot.context.event.ApplicationReadyEvent.class)
+    public void restoreEvaluation() {
+        roundRepository.findTopByOrderByRoundNumberDescIdDesc().ifPresent(r -> {
+            long[] c = r.evalCounts();
+            flowService.restoreCounts(r.getRoundNumber(), c[0], c[1], c[2], c[3]);
+            System.out.println("Current global model: v" + r.getRoundNumber() + " checksum=" + r.getModelChecksum()
+                + " evaluated samples=" + r.getEvalSamples());
+        });
+    }
+
+    /** Save the current model version's evaluation counts (called periodically and on shutdown). */
+    @jakarta.annotation.PreDestroy
+    public synchronized void persistEvaluation() {
+        roundRepository.findTopByOrderByRoundNumberDescIdDesc().ifPresent(r -> {
+            long[] live = flowService.getCounts(r.getRoundNumber());
+            if (Arrays.equals(live, r.evalCounts())) return;
+            r.setEvalCounts(live);
+            roundRepository.save(r);
+        });
+    }
+
+    /** The deployed global model, its own evaluation, and what the ML service reports. */
+    public Map<String, Object> currentModel() {
+        Map<String, Object> m = new HashMap<>();
+        Optional<FederatedRound> latest = roundRepository.findTopByOrderByRoundNumberDescIdDesc();
+        int version = latest.map(FederatedRound::getRoundNumber).orElse(0);
+        m.put("version", version);
+        m.put("checksum", latest.map(FederatedRound::getModelChecksum).orElse(null));
+        m.put("participants", latest.map(FederatedRound::getParticipants).orElse(0));
+        m.put("completedAt", latest.map(r -> String.valueOf(r.getCompletedAt())).orElse(null));
+        Map<String, Double> metrics = flowService.getEvaluationMetrics(version);
+        long samples = metrics.get("samples").longValue();
+        boolean evaluated = version > 0 && samples >= FederatedRound.MIN_EVAL_SAMPLES;
+        m.put("samples", samples);
+        m.put("evaluated", evaluated);
+        m.put("accuracy", evaluated ? metrics.get("accuracy") : null);
+        m.put("precision", evaluated ? metrics.get("precision") : null);
+        m.put("recall", evaluated ? metrics.get("recall") : null);
+        m.put("f1", evaluated ? metrics.get("f1") : null);
+        Integer mlVersion = mlWarmupService.getMlModelVersion();
+        m.put("mlVersion", mlVersion);
+        m.put("mlChecksum", mlWarmupService.getMlModelChecksum());
+        m.put("consistent", mlVersion == null ? null : (mlVersion == version
+            && Objects.equals(mlWarmupService.getMlModelChecksum(), m.get("checksum"))));
+        return m;
     }
 
     public void runFederatedRound() {
@@ -106,50 +157,53 @@ public class FederatedLearningService {
         // Step 2: FedAvg
         if (clientModels.isEmpty()) return;
 
+        int baseVersion = roundRepository.findTopByOrderByRoundNumberDescIdDesc()
+            .map(FederatedRound::getRoundNumber).orElse(0);
         Map<String, Object> fedAvgReq = new HashMap<>();
         fedAvgReq.put("client_models", clientModels);
         fedAvgReq.put("weights", weights);
+        fedAvgReq.put("base_version", baseVersion);
 
         try {
+            // /fedavg aggregates, deploys the model to every node and saves it; it only
+            // advances the version when that succeeds (otherwise it errors and keeps the old model)
             @SuppressWarnings("unchecked")
             Map<String, Object> fedAvgResponse = restTemplate.postForObject(ML_SERVICE_URL + "/fedavg", fedAvgReq, Map.class);
-            if (fedAvgResponse != null && fedAvgResponse.containsKey("global_model_params")) {
-                
-                // Step 3: Broadcast
-                Map<String, Object> broadcastReq = new HashMap<>();
-                broadcastReq.put("global_model_params", fedAvgResponse.get("global_model_params"));
-                restTemplate.postForObject(ML_SERVICE_URL + "/broadcast", broadcastReq, Map.class);
-                
-                // Extract version: model_version is a top-level field in /fedavg response
-                Object versionObj = fedAvgResponse.get("model_version");
-                int version = versionObj instanceof Number ? ((Number) versionObj).intValue() : (int) roundRepository.count() + 1;
-                
-                // Genuine evaluation metrics computed from actual model predictions
-                Map<String, Double> metrics = flowService.getEvaluationMetrics();
-                double accuracy = metrics.getOrDefault("accuracy", 0.0);
-
-                // Persist round record in database
-                FederatedRound round = new FederatedRound();
-                round.setRoundNumber(version);
-                round.setModelVersion("v" + version + ".0");
-                round.setParticipants(clientModels.size());
-                round.setAccuracyAfter(accuracy);
-                round.setCompletedAt(Instant.now());
-                roundRepository.save(round);
-                
-                // Notify frontend
-                Map<String, Object> event = new HashMap<>();
-                event.put("type", "FED_ROUND_COMPLETE");
-                event.put("version", version);
-                event.put("participants", clientModels.size());
-                event.put("accuracy", accuracy);
-                event.put("precision", metrics.get("precision"));
-                event.put("recall", metrics.get("recall"));
-                event.put("f1", metrics.get("f1"));
-                event.put("samples", metrics.get("samples"));
-                event.put("message", "FedAvg completed with " + clientModels.size() + " participants. Model v" + version + ".0");
-                messagingTemplate.convertAndSend("/topic/events", event);
+            Object versionObj = fedAvgResponse == null ? null : fedAvgResponse.get("model_version");
+            if (!(versionObj instanceof Number) || ((Number) versionObj).intValue() <= baseVersion) {
+                throw new IllegalStateException("ML service returned no new model version: " + versionObj);
             }
+            int version = ((Number) versionObj).intValue();
+            String checksum = String.valueOf(fedAvgResponse.get("model_checksum"));
+
+            // Close the previous version's evaluation before switching
+            persistEvaluation();
+            int prevVersion = baseVersion;
+            Map<String, Double> prevMetrics = flowService.getEvaluationMetrics(prevVersion);
+            boolean prevEvaluated = prevVersion > 0 && prevMetrics.get("samples") >= FederatedRound.MIN_EVAL_SAMPLES;
+
+            FederatedRound round = new FederatedRound();
+            round.setRoundNumber(version);
+            round.setModelVersion("v" + version + ".0");
+            round.setParticipants(clientModels.size());
+            round.setModelChecksum(checksum);
+            round.setEvalCounts(new long[4]); // not evaluated yet
+            round.setCompletedAt(Instant.now());
+            roundRepository.save(round);
+            mlWarmupService.recordModel(version, checksum);
+
+            Map<String, Object> event = new HashMap<>();
+            event.put("type", "FED_ROUND_COMPLETE");
+            event.put("version", version);
+            event.put("checksum", checksum);
+            event.put("participants", clientModels.size());
+            event.put("previousVersion", prevVersion);
+            event.put("previousAccuracy", prevEvaluated ? prevMetrics.get("accuracy") : null);
+            event.put("persisted", fedAvgResponse.get("persisted"));
+            event.put("message", "Model v" + version + ".0 deployed to " + clientModels.size() + " nodes"
+                + (prevEvaluated ? " (v" + prevVersion + ".0 scored " + prevMetrics.get("accuracy") + "%)" : "")
+                + "; now evaluating on live traffic");
+            messagingTemplate.convertAndSend("/topic/events", event);
         } catch (Exception e) {
             System.err.println("Failed FedAvg round: " + e.getMessage());
             // Report the failure; do not present it as a completed round

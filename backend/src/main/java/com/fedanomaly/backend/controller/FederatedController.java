@@ -22,6 +22,12 @@ public class FederatedController {
         fedLearningService.runFederatedRound();
     }
 
+    /** Deployed global model: version, checksum, and its own evaluation (null if not evaluated yet). */
+    @GetMapping("/current")
+    public java.util.Map<String, Object> current() {
+        return fedLearningService.currentModel();
+    }
+
     @GetMapping("/rounds")
     public List<FederatedRound> getRounds() {
         return roundRepository.findAll();

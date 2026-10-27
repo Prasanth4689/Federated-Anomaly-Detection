@@ -7,15 +7,17 @@ class FedAvgAggregator:
         self.model_version = 0
         self.round_history = []
         
-    def aggregate(self, client_params: list[dict], weights: list[float]) -> dict:
+    def aggregate(self, client_params: list[dict], weights: list[float], next_version: int = None) -> dict:
         """
         Trust-Weighted FedAvg:
         - Each client's contribution is scaled by its trust weight (0-1 range, derived from trust score / 100)
         - Higher trust nodes contribute more to the global model
         - Low-trust nodes (potentially compromised) have minimal impact
         """
-        self.model_version += 1
-        
+        # The version is only advanced by the caller once the new model has been applied
+        # (a failed or empty aggregation must not consume a version number).
+        version = next_version if next_version is not None else self.model_version + 1
+
         if not client_params or not weights:
             return {}
         
@@ -81,7 +83,7 @@ class FedAvgAggregator:
             
         # Record round metadata
         self.round_history.append({
-            "version": self.model_version,
+            "version": version,
             "n_participants": len(models),
             "weights": valid_weights,
             "n_trees": len(combined_estimators)
@@ -92,7 +94,7 @@ class FedAvgAggregator:
         return {
             "model_b64": base64.b64encode(global_model_bytes).decode('utf-8'),
             "round_info": {
-                "version": self.model_version,
+                "version": version,
                 "participants": len(models),
                 "trust_weights": valid_weights,
                 "total_trees": len(combined_estimators)

@@ -54,8 +54,9 @@ export default function App() {
   const [attackType, setAttackType]     = useState('DDOS');
   const [targetNode, setTargetNode]     = useState('');
   const [activeAttacks, setActiveAttacks] = useState<Record<string, string>>({});
-  const [initialRound, setInitialRound] = useState(0);
-  const [initialAccuracy, setInitialAccuracy] = useState<number | null>(null);
+  // Deployed global model and its own evaluation, as recorded by the backend
+  const [modelInfo, setModelInfo] = useState<{ version: number; checksum: string | null; evaluated: boolean;
+    accuracy: number | null; samples: number; consistent: boolean | null } | null>(null);
   const [backendReady, setBackendReady] = useState(false);
 
   const { packets, flows, events, nodeUpdates, simulationState } = useWebSocket();
@@ -84,19 +85,22 @@ export default function App() {
     if (!backendReady) return;
     // Wake the ML service now (it also sleeps when idle) so it is up before the simulation starts
     fetch(`${API_URL}/api/ml/wake`, { method: 'POST' }).catch(() => {});
-    fetch(`${API_URL}/api/federated/rounds`)
-      .then(r => r.json())
-      .then((rounds: any[]) => {
-        if (rounds && rounds.length > 0) {
-          const lastRound = rounds[rounds.length - 1];
-          setInitialRound(lastRound.roundNumber || rounds.length);
-          if (lastRound.accuracyAfter) {
-            setInitialAccuracy(lastRound.accuracyAfter);
-          }
-        }
-      })
-      .catch(() => {});
   }, [backendReady]);
+
+  // Model version + accuracy come from one source so they always belong together
+  const loadModelInfo = useCallback(() => {
+    fetch(`${API_URL}/api/federated/current`)
+      .then(r => r.json())
+      .then(setModelInfo)
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!backendReady) return;
+    loadModelInfo();
+    const t = setInterval(loadModelInfo, 5000); // evaluation accumulates on live traffic
+    return () => clearInterval(t);
+  }, [backendReady, loadModelInfo]);
 
   // Sync active attacks from events
   useEffect(() => {
@@ -178,15 +182,13 @@ export default function App() {
 
   // ── Derived data ───────────────────────────────────────────────────────────
   const fedRoundEvents  = useMemo(() => events.filter(e => e.type === 'FED_ROUND_COMPLETE'), [events]);
-  const fedRounds       = fedRoundEvents.length;
-  const currentRound    = fedRoundEvents.length > 0 ? (fedRoundEvents[0].version ?? fedRounds) : initialRound;
+  useEffect(() => { if (fedRoundEvents.length) loadModelInfo(); }, [fedRoundEvents.length, loadModelInfo]);
+  const currentRound    = modelInfo?.version ?? 0;
   const anomalyCount    = useMemo(() => events.filter(e => e.type === 'ANOMALY_DETECTED').length, [events]);
-  const accuracy = useMemo(() => {
-    if (fedRoundEvents.length > 0 && fedRoundEvents[0].accuracy != null) {
-      return fedRoundEvents[0].accuracy;
-    }
-    return initialAccuracy; // null until a real round has been evaluated
-  }, [fedRoundEvents, initialAccuracy]);
+  // Accuracy of the displayed version only; null until it has enough evaluated predictions
+  const accuracy = modelInfo?.evaluated ? modelInfo.accuracy : null;
+  const accuracyLabel = accuracy != null ? `${accuracy.toFixed(1)}%`
+    : currentRound > 0 ? `evaluating (${modelInfo?.samples ?? 0})` : '—';
 
   const networkLoad = useMemo(() => {
     if (!flows.length) return 0;
@@ -302,12 +304,12 @@ export default function App() {
           <div className="hidden md:flex items-center gap-4 bg-black/20 border border-soc-border rounded-lg px-4 py-1.5">
             <div className="flex flex-col">
               <span className="text-[9px] text-soc-muted uppercase">Global Model</span>
-              <span className="text-xs font-bold text-cyan-400">v{currentRound}.0 (Round #{currentRound})</span>
+              <span className="text-xs font-bold text-cyan-400" title={modelInfo?.checksum ? `model ${modelInfo.checksum}${modelInfo.consistent === false ? ' — ML service reports a different model' : ''}` : undefined}>v{currentRound}.0 (Round #{currentRound}){modelInfo?.consistent === false ? ' ⚠' : ''}</span>
             </div>
             <div className="w-px h-6 bg-soc-border"></div>
             <div className="flex flex-col">
               <span className="text-[9px] text-soc-muted uppercase">Global Accuracy</span>
-              <span className={`text-xs font-bold ${accuracy == null ? 'text-soc-muted' : accuracy >= 90 ? 'text-emerald-400' : 'text-amber-400'}`}>{accuracy == null ? '—' : `${accuracy.toFixed(1)}%`}</span>
+              <span className={`text-xs font-bold ${accuracy == null ? 'text-soc-muted' : accuracy >= 90 ? 'text-emerald-400' : 'text-amber-400'}`}>{accuracyLabel}</span>
             </div>
           </div>
 

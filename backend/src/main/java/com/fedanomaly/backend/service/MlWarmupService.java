@@ -37,6 +37,9 @@ public class MlWarmupService {
     private final AtomicBoolean warming = new AtomicBoolean(false);
     private volatile boolean reachable = false;
     private volatile Instant lastSuccess = null;
+    // Model version/checksum last reported by the ML service (via /health or a completed round)
+    private volatile Integer mlModelVersion = null;
+    private volatile String mlModelChecksum = null;
 
     @EventListener(ApplicationReadyEvent.class)
     public void onStartup() {
@@ -71,18 +74,31 @@ public class MlWarmupService {
 
     private boolean ping() {
         try {
-            restTemplate.getForObject(mlServiceUrl + "/health", Map.class);
+            Map<?, ?> health = restTemplate.getForObject(mlServiceUrl + "/health", Map.class);
+            if (health != null && health.get("model_version") instanceof Number v) {
+                recordModel(v.intValue(), health.get("model_checksum") == null ? null : String.valueOf(health.get("model_checksum")));
+            }
             return true;
         } catch (Exception e) {
             return false;
         }
     }
 
+    public void recordModel(int version, String checksum) {
+        mlModelVersion = version;
+        mlModelChecksum = checksum;
+    }
+
+    public Integer getMlModelVersion() { return mlModelVersion; }
+    public String getMlModelChecksum() { return mlModelChecksum; }
+
     public Map<String, Object> status() {
         Map<String, Object> s = new HashMap<>();
         s.put("reachable", reachable);
         s.put("warming", warming.get());
         s.put("lastSuccess", lastSuccess != null ? lastSuccess.toString() : null);
+        s.put("modelVersion", mlModelVersion);
+        s.put("modelChecksum", mlModelChecksum);
         return s;
     }
 

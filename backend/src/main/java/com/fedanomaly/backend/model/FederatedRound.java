@@ -21,6 +21,17 @@ public class FederatedRound {
     private String modelVersion;
     private double accuracyBefore;
     private double accuracyAfter;
+
+    // Global model artifact this round produced, and its own evaluation on live traffic
+    // (confusion counts of predictions made by this version). Nullable: older rows keep working.
+    private String modelChecksum;
+    private Long evalTp;
+    private Long evalFp;
+    private Long evalFn;
+    private Long evalTn;
+
+    /** Below this many evaluated predictions a version is reported as "not evaluated yet". */
+    public static final long MIN_EVAL_SAMPLES = 30;
     
     // Getters and Setters
     public Long getId() { return id; }
@@ -41,4 +52,21 @@ public class FederatedRound {
     public void setAccuracyBefore(double accuracyBefore) { this.accuracyBefore = accuracyBefore; }
     public double getAccuracyAfter() { return accuracyAfter; }
     public void setAccuracyAfter(double accuracyAfter) { this.accuracyAfter = accuracyAfter; }
+    public String getModelChecksum() { return modelChecksum; }
+    public void setModelChecksum(String modelChecksum) { this.modelChecksum = modelChecksum; }
+    public long[] evalCounts() {
+        return new long[]{ n(evalTp), n(evalFp), n(evalFn), n(evalTn) };
+    }
+    public void setEvalCounts(long[] c) {
+        evalTp = c[0]; evalFp = c[1]; evalFn = c[2]; evalTn = c[3];
+        if (getEvalAccuracy() != null) accuracyAfter = getEvalAccuracy();
+    }
+    public long getEvalSamples() { return n(evalTp) + n(evalFp) + n(evalFn) + n(evalTn); }
+    /** Accuracy of this version's own predictions, or null if not evaluated yet. */
+    public Double getEvalAccuracy() {
+        long total = getEvalSamples();
+        if (total < MIN_EVAL_SAMPLES) return null;
+        return Math.round((double) (n(evalTp) + n(evalTn)) / total * 1000.0) / 10.0;
+    }
+    private static long n(Long v) { return v == null ? 0 : v; }
 }

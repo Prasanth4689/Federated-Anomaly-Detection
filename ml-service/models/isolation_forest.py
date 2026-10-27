@@ -1,5 +1,6 @@
 import numpy as np
 from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import StandardScaler
 import pickle
 import base64
 
@@ -17,11 +18,25 @@ class AnomalyDetector:
             random_state=42
         )
         self.is_fitted = False
+        # Feature scaler fitted on this node's own data (kept with the model so a saved
+        # model always loads with the scaling it was trained/calibrated with)
+        self.scaler = None
+        # Global model version this detector currently runs (None = local-only / untrained)
+        self.version = None
         # This node's own (already scaled) training features. Stays local; used only
         # to calibrate the global model's threshold on this node.
         self._local_X = None
 
-    def fit(self, X: np.ndarray) -> dict:
+    def scale(self, X_raw: np.ndarray) -> np.ndarray:
+        if getattr(self, "scaler", None) is not None:
+            return self.scaler.transform(X_raw)
+        # No scaler yet (node never trained): standardise the batch itself, as before
+        return StandardScaler().fit_transform(X_raw) if len(X_raw) > 1 else X_raw
+
+    def fit(self, X_raw: np.ndarray) -> dict:
+        """Fit on raw features: fits this node's scaler, then the Isolation Forest."""
+        self.scaler = StandardScaler().fit(X_raw) if len(X_raw) > 1 else None
+        X = self.scale(X_raw)
         self.model.set_params(max_samples=min(COMMON_MAX_SAMPLES, len(X)))
         self.model.fit(X)
         self.is_fitted = True
@@ -33,10 +48,11 @@ class AnomalyDetector:
             "mean_score": float(np.mean(self.model.score_samples(X)))
         }
 
-    def predict(self, X: np.ndarray) -> tuple:
+    def predict(self, X_raw: np.ndarray) -> tuple:
         if not self.is_fitted:
             # Return zeros/ones if not fitted to avoid crashing
-            return np.ones(len(X)), np.zeros(len(X))
+            return np.ones(len(X_raw)), np.zeros(len(X_raw))
+        X = self.scale(X_raw)
 
         # One model pass: same rule as IsolationForest.predict (score - offset_ < 0 -> anomaly)
         scores = self.model.score_samples(X)

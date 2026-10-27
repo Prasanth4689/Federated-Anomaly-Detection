@@ -1,5 +1,4 @@
 import numpy as np
-from sklearn.preprocessing import StandardScaler
 
 # Feature names for explainability
 FEATURE_NAMES = [
@@ -8,10 +7,7 @@ FEATURE_NAMES = [
     "byte_variance", "port_diversity", "small_packet_ratio"
 ]
 
-# Persistent scalers per node — fitted during training, reused during prediction
-_scalers: dict[str, StandardScaler] = {}
-
-def extract_features(flow_data: list[dict], node_id: str = None, fit_scaler: bool = False) -> np.ndarray:
+def extract_features(flow_data: list[dict]) -> np.ndarray:
     """
     Extract network flow features for anomaly detection.
 
@@ -64,26 +60,7 @@ def extract_features(flow_data: list[dict], node_id: str = None, fit_scaler: boo
     # Handle NaN/Inf
     X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # Scaling: use persisted scaler if available
-    scaler_key = node_id or "__global__"
-
-    if fit_scaler:
-        # Training: fit and store scaler
-        if len(X) > 1:
-            scaler = StandardScaler()
-            X = scaler.fit_transform(X)
-            _scalers[scaler_key] = scaler
-    else:
-        # Prediction: reuse fitted scaler if available
-        if scaler_key in _scalers:
-            X = _scalers[scaler_key].transform(X)
-        elif "__global__" in _scalers:
-            X = _scalers["__global__"].transform(X)
-        elif len(X) > 1:
-            # Fallback: fit new scaler (first prediction before any training)
-            scaler = StandardScaler()
-            X = scaler.fit_transform(X)
-
+    # Unscaled: each node's AnomalyDetector owns (and persists) its scaler
     return X
 
 

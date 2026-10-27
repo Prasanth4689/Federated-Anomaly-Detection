@@ -56,6 +56,7 @@ public class SimulationService {
             executorService.shutdown();
         }
         state = "PAUSED";
+        fedLearningService.persistEvaluation();
         broadcastState();
     }
 
@@ -64,6 +65,7 @@ public class SimulationService {
             executorService.shutdownNow();
         }
         state = "STOPPED";
+        fedLearningService.persistEvaluation();
         tickCount = 0;
         broadcastState();
     }
@@ -102,6 +104,11 @@ public class SimulationService {
             }
 
             // Run FedAvg round every 20 ticks (10 seconds at 1x)
+            // Persist the current model's evaluation so a restart does not lose it
+            if (tickCount % 10 == 0) {
+                fedLearningService.persistEvaluation();
+            }
+
             if (tickCount % 20 == 0) {
                 fedLearningService.runFederatedRound();
             }

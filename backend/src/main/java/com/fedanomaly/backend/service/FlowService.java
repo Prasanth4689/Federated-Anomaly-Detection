@@ -7,7 +7,6 @@ import com.fedanomaly.backend.model.NodeStatus;
 import com.fedanomaly.backend.repository.NetworkFlowRepository;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.Map;
 import java.util.Set;
 import java.util.HashSet;
@@ -40,11 +39,14 @@ public class FlowService {
     // Ground truth tracking per flow (kept separate from inference payload)
     private final Map<UUID, Boolean> flowGroundTruth = new ConcurrentHashMap<>();
 
-    // Real confusion matrix counters computed from actual ML predictions vs simulated truth
-    private final AtomicLong truePositives = new AtomicLong(0);
-    private final AtomicLong falsePositives = new AtomicLong(0);
-    private final AtomicLong falseNegatives = new AtomicLong(0);
-    private final AtomicLong trueNegatives = new AtomicLong(0);
+    // Confusion counts per global model version: {tp, fp, fn, tn}. Each prediction is credited
+    // to the model version that made it, so a version's accuracy is its own (prequential
+    // evaluation on live traffic it was not trained on). Untrained/local-only predictions
+    // carry no version and are not counted.
+    private final Map<Integer, long[]> versionCounts = new ConcurrentHashMap<>();
+
+    // Nodes whose outgoing traffic the IDS scored in the current window (verifiable behaviour)
+    private final Set<String> observedSources = ConcurrentHashMap.newKeySet();
 
     // External hosts blocked at the perimeter firewall after the ML flagged them
     private final Set<String> blockedExternal = ConcurrentHashMap.newKeySet();
@@ -61,6 +63,12 @@ public class FlowService {
         this.nodeRepository = nodeRepository;
         this.attackService = attackService;
         this.restTemplate = MlHttp.restTemplate(10_000); // never let a slow ML call freeze a tick
+    }
+
+    public Set<String> getAndClearObservedSources() {
+        Set<String> snapshot = new HashSet<>(observedSources);
+        observedSources.clear();
+        return snapshot;
     }
 
     public Set<String> getAndClearActiveSuspiciousSources() {
@@ -173,6 +181,8 @@ public class FlowService {
                 if (response != null && response.containsKey("predictions")) {
                     @SuppressWarnings("unchecked")
                     List<Map<String, Object>> preds = (List<Map<String, Object>>) response.get("predictions");
+                    Object versionObj = response.get("model_version");
+                    Integer modelVersion = versionObj instanceof Number n ? n.intValue() : null;
                     
                     // Track which sources are generating anomalous flows
                     Map<String, Integer> sourceAnomalyCounts = new HashMap<>();
@@ -188,18 +198,16 @@ public class FlowService {
                         f.setLabel(isAnomaly ? "ANOMALY" : "NORMAL");
                         f.setAnomalyScore(score);
 
-                        // Accumulate evaluation metrics based on actual model prediction
+                        // Evaluate the model version that made this prediction against simulated truth
                         boolean isActualAttack = flowGroundTruth.getOrDefault(f.getFlowId(), false);
-                        if (isActualAttack && isAnomaly) {
-                            truePositives.incrementAndGet();
-                        } else if (!isActualAttack && isAnomaly) {
-                            falsePositives.incrementAndGet();
-                        } else if (isActualAttack && !isAnomaly) {
-                            falseNegatives.incrementAndGet();
-                        } else {
-                            trueNegatives.incrementAndGet();
+                        if (modelVersion != null) {
+                            long[] c = versionCounts.computeIfAbsent(modelVersion, v -> new long[4]);
+                            synchronized (c) {
+                                c[isActualAttack ? (isAnomaly ? 0 : 2) : (isAnomaly ? 1 : 3)]++;
+                            }
                         }
                         flowGroundTruth.remove(f.getFlowId());
+                        observedSources.add(f.getSourceNode());
                         
                         if (isAnomaly) {
                             String attackerId = f.getSourceNode();
@@ -317,11 +325,21 @@ public class FlowService {
         }
     }
 
-    public Map<String, Double> getEvaluationMetrics() {
-        long tp = truePositives.get();
-        long fp = falsePositives.get();
-        long fn = falseNegatives.get();
-        long tn = trueNegatives.get();
+    /** Continue counting for a version from persisted counts (after a backend restart). */
+    public void restoreCounts(int version, long tp, long fp, long fn, long tn) {
+        versionCounts.put(version, new long[]{tp, fp, fn, tn});
+    }
+
+    /** {tp, fp, fn, tn} for a model version (zeros if it has made no counted predictions). */
+    public long[] getCounts(int version) {
+        long[] c = versionCounts.get(version);
+        if (c == null) return new long[4];
+        synchronized (c) { return c.clone(); }
+    }
+
+    public Map<String, Double> getEvaluationMetrics(int version) {
+        long[] c = getCounts(version);
+        long tp = c[0], fp = c[1], fn = c[2], tn = c[3];
         long total = tp + fp + fn + tn;
         
         // No data -> 0 (never a made-up value); undefined ratios -> 0 (zero_division=0)

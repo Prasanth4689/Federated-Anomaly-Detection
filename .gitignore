@@ -14,3 +14,5 @@ venv/
 backend/data/*.db*
 
 ml-service/**/__pycache__/
+
+ml-service/state/
