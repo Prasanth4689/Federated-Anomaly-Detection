@@ -47,10 +47,10 @@ public class FederatedLearningService {
     @org.springframework.context.event.EventListener(org.springframework.boot.context.event.ApplicationReadyEvent.class)
     public void restoreEvaluation() {
         roundRepository.findTopByOrderByRoundNumberDescIdDesc().ifPresent(r -> {
-            long[] c = r.evalCounts();
+            long[] c = r.liveCounts();
             flowService.restoreCounts(r.getRoundNumber(), c[0], c[1], c[2], c[3]);
             System.out.println("Current global model: v" + r.getRoundNumber() + " checksum=" + r.getModelChecksum()
-                + " evaluated samples=" + r.getEvalSamples());
+                + " evaluated samples=" + r.getLiveSamples());
         });
     }
 
@@ -59,13 +59,21 @@ public class FederatedLearningService {
     public synchronized void persistEvaluation() {
         roundRepository.findTopByOrderByRoundNumberDescIdDesc().ifPresent(r -> {
             long[] live = flowService.getCounts(r.getRoundNumber());
-            if (Arrays.equals(live, r.evalCounts())) return;
-            r.setEvalCounts(live);
+            if (Arrays.equals(live, r.liveCounts())) return;
+            r.setLiveCounts(live);
             roundRepository.save(r);
         });
     }
 
-    /** The deployed global model, its own evaluation, and what the ML service reports. */
+    private static Double num(Map<String, Object> m, String key) {
+        return m != null && m.get(key) instanceof Number v ? v.doubleValue() : null;
+    }
+
+    /**
+     * The deployed global model and its two (separate) metrics:
+     *  - global*: fixed-dataset accuracy stored with the version; changes only with a new version
+     *  - live: this version's predictions on simulated traffic since deployment; grows with traffic
+     */
     public Map<String, Object> currentModel() {
         Map<String, Object> m = new HashMap<>();
         Optional<FederatedRound> latest = roundRepository.findTopByOrderByRoundNumberDescIdDesc();
@@ -74,15 +82,26 @@ public class FederatedLearningService {
         m.put("checksum", latest.map(FederatedRound::getModelChecksum).orElse(null));
         m.put("participants", latest.map(FederatedRound::getParticipants).orElse(0));
         m.put("completedAt", latest.map(r -> String.valueOf(r.getCompletedAt())).orElse(null));
+        m.put("globalAccuracy", latest.map(FederatedRound::getGlobalAccuracy).orElse(null));
+        m.put("globalPrecision", latest.map(FederatedRound::getGlobalPrecision).orElse(null));
+        m.put("globalRecall", latest.map(FederatedRound::getGlobalRecall).orElse(null));
+        m.put("globalF1", latest.map(FederatedRound::getGlobalF1).orElse(null));
+        m.put("evalDatasetId", latest.map(FederatedRound::getEvalDatasetId).orElse(null));
+        m.put("evalDatasetSize", latest.map(FederatedRound::getEvalDatasetSize).orElse(null));
+        m.put("evaluated", latest.map(r -> r.getGlobalAccuracy() != null).orElse(false));
+
         Map<String, Double> metrics = flowService.getEvaluationMetrics(version);
         long samples = metrics.get("samples").longValue();
-        boolean evaluated = version > 0 && samples >= FederatedRound.MIN_EVAL_SAMPLES;
-        m.put("samples", samples);
-        m.put("evaluated", evaluated);
-        m.put("accuracy", evaluated ? metrics.get("accuracy") : null);
-        m.put("precision", evaluated ? metrics.get("precision") : null);
-        m.put("recall", evaluated ? metrics.get("recall") : null);
-        m.put("f1", evaluated ? metrics.get("f1") : null);
+        boolean liveEnough = version > 0 && samples >= FederatedRound.MIN_LIVE_SAMPLES;
+        Map<String, Object> live = new HashMap<>();
+        live.put("window", "predictions made by v" + version + ".0 on simulated traffic since it was deployed");
+        live.put("groundTruth", "simulator attack labels");
+        live.put("samples", samples);
+        live.put("accuracy", liveEnough ? metrics.get("accuracy") : null);
+        live.put("precision", liveEnough ? metrics.get("precision") : null);
+        live.put("recall", liveEnough ? metrics.get("recall") : null);
+        live.put("f1", liveEnough ? metrics.get("f1") : null);
+        m.put("live", live);
         Integer mlVersion = mlWarmupService.getMlModelVersion();
         m.put("mlVersion", mlVersion);
         m.put("mlChecksum", mlWarmupService.getMlModelChecksum());
@@ -176,18 +195,21 @@ public class FederatedLearningService {
             int version = ((Number) versionObj).intValue();
             String checksum = String.valueOf(fedAvgResponse.get("model_checksum"));
 
-            // Close the previous version's evaluation before switching
+            // Close the previous version's live counts before switching
             persistEvaluation();
-            int prevVersion = baseVersion;
-            Map<String, Double> prevMetrics = flowService.getEvaluationMetrics(prevVersion);
-            boolean prevEvaluated = prevVersion > 0 && prevMetrics.get("samples") >= FederatedRound.MIN_EVAL_SAMPLES;
+            @SuppressWarnings("unchecked")
+            Map<String, Object> ev = (Map<String, Object>) fedAvgResponse.get("evaluation");
+            Double globalAccuracy = num(ev, "accuracy");
 
             FederatedRound round = new FederatedRound();
             round.setRoundNumber(version);
             round.setModelVersion("v" + version + ".0");
             round.setParticipants(clientModels.size());
             round.setModelChecksum(checksum);
-            round.setEvalCounts(new long[4]); // not evaluated yet
+            round.setLiveCounts(new long[4]); // no live predictions yet
+            round.setGlobalEvaluation(globalAccuracy, num(ev, "precision"), num(ev, "recall"), num(ev, "f1"),
+                ev == null ? null : String.valueOf(ev.get("dataset_id")),
+                ev != null && ev.get("n") instanceof Number n ? n.longValue() : null);
             round.setCompletedAt(Instant.now());
             roundRepository.save(round);
             mlWarmupService.recordModel(version, checksum);
@@ -197,12 +219,12 @@ public class FederatedLearningService {
             event.put("version", version);
             event.put("checksum", checksum);
             event.put("participants", clientModels.size());
-            event.put("previousVersion", prevVersion);
-            event.put("previousAccuracy", prevEvaluated ? prevMetrics.get("accuracy") : null);
+            event.put("globalAccuracy", globalAccuracy);
+            event.put("evalDatasetId", ev == null ? null : ev.get("dataset_id"));
             event.put("persisted", fedAvgResponse.get("persisted"));
-            event.put("message", "Model v" + version + ".0 deployed to " + clientModels.size() + " nodes"
-                + (prevEvaluated ? " (v" + prevVersion + ".0 scored " + prevMetrics.get("accuracy") + "%)" : "")
-                + "; now evaluating on live traffic");
+            event.put("message", "Model v" + version + ".0 deployed to " + clientModels.size() + " nodes, "
+                + (globalAccuracy != null ? "accuracy " + globalAccuracy + "% on evaluation set " + ev.get("dataset_id")
+                                          : "not evaluated (evaluation dataset unavailable)"));
             messagingTemplate.convertAndSend("/topic/events", event);
         } catch (Exception e) {
             System.err.println("Failed FedAvg round: " + e.getMessage());

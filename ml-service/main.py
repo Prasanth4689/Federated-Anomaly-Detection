@@ -10,6 +10,7 @@ import time
 from models.isolation_forest import AnomalyDetector
 from federated.aggregator import FedAvgAggregator
 from utils.feature_engineering import extract_features, get_feature_contributions
+import evaluation
 
 app = FastAPI(title="ML Service")
 
@@ -25,6 +26,9 @@ aggregator = FedAvgAggregator()
 global_model = AnomalyDetector()
 model_checksum: Optional[str] = None
 saved_at: Optional[str] = None
+# Fixed-dataset evaluation of the deployed version, computed once when it is deployed
+model_evaluation: Optional[dict] = None
+EVAL_DATASET_ID, EVAL_BATCHES = evaluation.load_dataset()
 
 
 def _checksum(params: dict) -> str:
@@ -38,6 +42,7 @@ def save_state() -> bool:
     state = {
         "model_version": aggregator.model_version,
         "model_checksum": model_checksum,
+        "model_evaluation": model_evaluation,
         "global_params": global_model.get_params(),
         "local_models": local_models,
         "saved_at": stamp,
@@ -57,7 +62,7 @@ def save_state() -> bool:
 
 def load_state() -> None:
     """Load the saved model at startup instead of starting from an empty model."""
-    global model_checksum, saved_at
+    global model_checksum, saved_at, model_evaluation
     if not os.path.exists(STATE_PATH):
         print(f"No saved ML state at {STATE_PATH}; starting without a global model", flush=True)
         return
@@ -73,6 +78,7 @@ def load_state() -> None:
         local_models.update(state["local_models"])
         aggregator.model_version = int(state["model_version"])
         model_checksum = state["model_checksum"]
+        model_evaluation = state.get("model_evaluation")
         saved_at = state.get("saved_at")
         print(f"Loaded ML state: model v{aggregator.model_version} checksum={model_checksum} "
               f"nodes={len(local_models)}", flush=True)
@@ -89,7 +95,29 @@ def model_info() -> dict:
         "model_checksum": model_checksum,
         "saved_at": saved_at,
         "nodes": sorted(local_models.keys()),
+        "evaluation": model_evaluation,
     }
+
+
+def model_for_node(node_id: str) -> AnomalyDetector:
+    """The model a node's IDS uses: its deployed model, or the global model for a node without one."""
+    det = local_models.get(node_id)
+    if det is None:
+        det = AnomalyDetector()
+        if global_model.is_fitted:
+            det.set_params(global_model.get_params())
+            det.version = aggregator.model_version
+    return det
+
+
+def evaluate_deployed() -> Optional[dict]:
+    if not global_model.is_fitted:
+        return None
+    result = evaluation.evaluate(model_for_node, EVAL_DATASET_ID, EVAL_BATCHES)
+    if result is not None:
+        result["model_version"] = aggregator.model_version
+        result["model_checksum"] = model_checksum
+    return result
 
 
 @app.get("/")
@@ -103,6 +131,14 @@ def health():
 @app.get("/model")
 def model():
     return model_info()
+
+@app.get("/evaluate")
+def evaluate_now():
+    """Re-score the deployed version on the fixed dataset (read-only; nothing is stored)."""
+    fresh = evaluate_deployed()
+    return {"stored": model_evaluation, "recomputed": fresh,
+            "matches": fresh is not None and model_evaluation is not None
+                       and {k: fresh[k] for k in ("tp", "fp", "fn", "tn")} == {k: model_evaluation[k] for k in ("tp", "fp", "fn", "tn")}}
 
 class TrainRequest(BaseModel):
     node_id: str
@@ -139,11 +175,8 @@ def train(req: TrainRequest):
 @app.post("/predict")
 def predict(req: PredictRequest):
     model = local_models.get(req.node_id)
-    if model is None:
-        model = AnomalyDetector()
-        if global_model.is_fitted:  # node without its own model yet: start from the global one
-            model.set_params(global_model.get_params())
-            model.version = aggregator.model_version
+    if model is None:  # node without its own model yet: start from the global one
+        model = model_for_node(req.node_id)
         local_models[req.node_id] = model
 
     X = extract_features(req.flow_data)
@@ -198,7 +231,7 @@ def apply_global(params: dict, version: int) -> List[str]:
 
 @app.post("/fedavg")
 def fedavg(req: FedAvgRequest):
-    global model_checksum
+    global model_checksum, model_evaluation
     new_version = max(aggregator.model_version, req.base_version) + 1
     global_params = aggregator.aggregate(req.client_models, req.weights, next_version=new_version)
     if not global_params or "model_b64" not in global_params:
@@ -209,6 +242,8 @@ def fedavg(req: FedAvgRequest):
     updated = apply_global(global_params, new_version)
     aggregator.model_version = new_version  # advanced only after the model is in place
     model_checksum = _checksum(global_params)
+    # Evaluate the newly deployed version once, on the fixed dataset, and keep it with the version
+    model_evaluation = evaluate_deployed()
     persisted = save_state()
 
     return {
@@ -217,16 +252,16 @@ def fedavg(req: FedAvgRequest):
         "model_checksum": model_checksum,
         "updated_node_ids": updated,
         "persisted": persisted,
+        "evaluation": model_evaluation,
     }
 
 @app.post("/broadcast")
 def broadcast(req: BroadcastRequest):
-    # /fedavg already deploys the new model to every node; this re-applies given params
-    # (kept for API compatibility) without changing the version.
-    if "model_b64" not in req.global_model_params:
-        return {"updated_node_ids": []}
-    updated = apply_global(req.global_model_params, aggregator.model_version)
-    save_state()
-    return {"updated_node_ids": updated}
+    # /fedavg already deploys each new model to every node. Re-deploying different parameters here
+    # would change the model without a new version (and invalidate its evaluation), so only the
+    # current model is accepted, as a no-op.
+    if "model_b64" not in req.global_model_params or _checksum(req.global_model_params) != model_checksum:
+        raise HTTPException(status_code=409, detail="only /fedavg may deploy a new model (it assigns the version)")
+    return {"updated_node_ids": sorted(local_models), "model_version": aggregator.model_version}
 
 # Flow export lives in the backend (/api/flows/export); the ML service never holds raw flows.

@@ -22,16 +22,28 @@ public class FederatedRound {
     private double accuracyBefore;
     private double accuracyAfter;
 
-    // Global model artifact this round produced, and its own evaluation on live traffic
-    // (confusion counts of predictions made by this version). Nullable: older rows keep working.
+    // Global model artifact this round produced
     private String modelChecksum;
+
+    // Global model accuracy: computed once by the ML service on the fixed, versioned evaluation
+    // dataset right after this version was deployed. Never changes afterwards.
+    private Double globalAccuracy;
+    private Double globalPrecision;
+    private Double globalRecall;
+    private Double globalF1;
+    private String evalDatasetId;
+    private Long evalDatasetSize;
+
+    // Separate live metric: confusion counts of the predictions this version made on simulated
+    // traffic since it was deployed (ground truth = simulator attack labels). Grows with traffic.
+    // Column names kept from the previous schema. Nullable: older rows keep working.
     private Long evalTp;
     private Long evalFp;
     private Long evalFn;
     private Long evalTn;
 
-    /** Below this many evaluated predictions a version is reported as "not evaluated yet". */
-    public static final long MIN_EVAL_SAMPLES = 30;
+    /** Below this many live predictions the live metric is reported as "not enough data yet". */
+    public static final long MIN_LIVE_SAMPLES = 30;
     
     // Getters and Setters
     public Long getId() { return id; }
@@ -54,18 +66,31 @@ public class FederatedRound {
     public void setAccuracyAfter(double accuracyAfter) { this.accuracyAfter = accuracyAfter; }
     public String getModelChecksum() { return modelChecksum; }
     public void setModelChecksum(String modelChecksum) { this.modelChecksum = modelChecksum; }
-    public long[] evalCounts() {
+    public Double getGlobalAccuracy() { return globalAccuracy; }
+    public Double getGlobalPrecision() { return globalPrecision; }
+    public Double getGlobalRecall() { return globalRecall; }
+    public Double getGlobalF1() { return globalF1; }
+    public String getEvalDatasetId() { return evalDatasetId; }
+    public Long getEvalDatasetSize() { return evalDatasetSize; }
+    /** Set once, when the version is created, from the ML service's fixed-dataset evaluation. */
+    public void setGlobalEvaluation(Double accuracy, Double precision, Double recall, Double f1,
+                                    String datasetId, Long datasetSize) {
+        globalAccuracy = accuracy; globalPrecision = precision; globalRecall = recall; globalF1 = f1;
+        evalDatasetId = datasetId; evalDatasetSize = datasetSize;
+        accuracyAfter = accuracy != null ? accuracy : 0.0;
+    }
+
+    public long[] liveCounts() {
         return new long[]{ n(evalTp), n(evalFp), n(evalFn), n(evalTn) };
     }
-    public void setEvalCounts(long[] c) {
+    public void setLiveCounts(long[] c) {
         evalTp = c[0]; evalFp = c[1]; evalFn = c[2]; evalTn = c[3];
-        if (getEvalAccuracy() != null) accuracyAfter = getEvalAccuracy();
     }
-    public long getEvalSamples() { return n(evalTp) + n(evalFp) + n(evalFn) + n(evalTn); }
-    /** Accuracy of this version's own predictions, or null if not evaluated yet. */
-    public Double getEvalAccuracy() {
-        long total = getEvalSamples();
-        if (total < MIN_EVAL_SAMPLES) return null;
+    public long getLiveSamples() { return n(evalTp) + n(evalFp) + n(evalFn) + n(evalTn); }
+    /** Live accuracy of this version on simulated traffic, or null with too few predictions. */
+    public Double getLiveAccuracy() {
+        long total = getLiveSamples();
+        if (total < MIN_LIVE_SAMPLES) return null;
         return Math.round((double) (n(evalTp) + n(evalTn)) / total * 1000.0) / 10.0;
     }
     private static long n(Long v) { return v == null ? 0 : v; }

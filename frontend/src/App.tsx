@@ -56,7 +56,9 @@ export default function App() {
   const [activeAttacks, setActiveAttacks] = useState<Record<string, string>>({});
   // Deployed global model and its own evaluation, as recorded by the backend
   const [modelInfo, setModelInfo] = useState<{ version: number; checksum: string | null; evaluated: boolean;
-    accuracy: number | null; samples: number; consistent: boolean | null } | null>(null);
+    globalAccuracy: number | null; globalPrecision: number | null; globalRecall: number | null;
+    evalDatasetId: string | null; evalDatasetSize: number | null; consistent: boolean | null;
+    live: { accuracy: number | null; samples: number; window: string } } | null>(null);
   const [backendReady, setBackendReady] = useState(false);
 
   const { packets, flows, events, nodeUpdates, simulationState } = useWebSocket();
@@ -185,10 +187,15 @@ export default function App() {
   useEffect(() => { if (fedRoundEvents.length) loadModelInfo(); }, [fedRoundEvents.length, loadModelInfo]);
   const currentRound    = modelInfo?.version ?? 0;
   const anomalyCount    = useMemo(() => events.filter(e => e.type === 'ANOMALY_DETECTED').length, [events]);
-  // Accuracy of the displayed version only; null until it has enough evaluated predictions
-  const accuracy = modelInfo?.evaluated ? modelInfo.accuracy : null;
-  const accuracyLabel = accuracy != null ? `${accuracy.toFixed(1)}%`
-    : currentRound > 0 ? `evaluating (${modelInfo?.samples ?? 0})` : '—';
+  // Global accuracy: fixed-dataset score stored with the displayed version (changes only with a new version)
+  const accuracy = modelInfo?.globalAccuracy ?? null;
+  const accuracyLabel = accuracy != null ? `${accuracy.toFixed(1)}%` : currentRound > 0 ? 'not evaluated' : '—';
+  const accuracyTitle = accuracy != null
+    ? `v${currentRound}.0 on fixed evaluation set ${modelInfo?.evalDatasetId} (${modelInfo?.evalDatasetSize} flows) — precision ${modelInfo?.globalPrecision}%, recall ${modelInfo?.globalRecall}%`
+    : undefined;
+  // Separate live metric: this version's predictions on simulated traffic since it was deployed
+  const live = modelInfo?.live;
+  const liveLabel = live?.accuracy != null ? `${live.accuracy.toFixed(1)}% (${live.samples})` : `— (${live?.samples ?? 0})`;
 
   const networkLoad = useMemo(() => {
     if (!flows.length) return 0;
@@ -309,7 +316,12 @@ export default function App() {
             <div className="w-px h-6 bg-soc-border"></div>
             <div className="flex flex-col">
               <span className="text-[9px] text-soc-muted uppercase">Global Accuracy</span>
-              <span className={`text-xs font-bold ${accuracy == null ? 'text-soc-muted' : accuracy >= 90 ? 'text-emerald-400' : 'text-amber-400'}`}>{accuracyLabel}</span>
+              <span title={accuracyTitle} className={`text-xs font-bold ${accuracy == null ? 'text-soc-muted' : accuracy >= 90 ? 'text-emerald-400' : 'text-amber-400'}`}>{accuracyLabel}</span>
+            </div>
+            <div className="w-px h-6 bg-soc-border"></div>
+            <div className="flex flex-col" title={live ? `Live metric: ${live.window}; ground truth: simulator attack labels` : undefined}>
+              <span className="text-[9px] text-soc-muted uppercase">Live (v{currentRound}.0)</span>
+              <span className="text-xs font-bold text-soc-muted">{liveLabel}</span>
             </div>
           </div>
 

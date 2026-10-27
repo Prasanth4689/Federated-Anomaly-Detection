@@ -88,3 +88,51 @@ def test_untrained_predictions_have_no_version(ml):
     m = ml()
     r = m.predict(m.PredictRequest(node_id="x", flow_data=flows(5, seed=1)))
     assert r["model_version"] is None
+
+
+# --- fixed-dataset evaluation -------------------------------------------------------------
+
+def test_accuracy_is_stored_with_version_and_does_not_drift(ml):
+    m = ml()
+    r = run_round(m)
+    ev = r["evaluation"]
+    assert ev["model_version"] == 1 and ev["model_checksum"] == r["model_checksum"]
+    assert ev["dataset_id"].startswith("eval-v1-") and ev["n"] > 2000
+    # live traffic (including attack-like traffic) must not change the stored accuracy
+    for k in range(20):
+        m.predict(m.PredictRequest(node_id="a", flow_data=flows(40, seed=100 + k, small=(k % 2 == 0))))
+        m.predict(m.PredictRequest(node_id=f"new-{k}", flow_data=flows(5, seed=k)))
+    check = m.evaluate_now()
+    assert check["matches"] is True and check["stored"] == ev
+
+    m2 = ml()  # restart: same version, same stored evaluation, and re-scoring still matches
+    assert m2.model_evaluation == ev
+    assert m2.evaluate_now()["matches"] is True
+
+
+def test_new_version_gets_its_own_evaluation(ml):
+    m = ml()
+    e1 = run_round(m)["evaluation"]
+    e2 = run_round(m, nodes=("a", "b", "d"))["evaluation"]
+    assert (e1["model_version"], e2["model_version"]) == (1, 2)
+    assert e2["model_checksum"] != e1["model_checksum"]
+
+
+def test_broadcast_cannot_change_the_model_without_a_version(ml):
+    m = ml()
+    r = run_round(m)
+    other = m.train(m.TrainRequest(node_id="a", flow_data=flows(80, seed=55)))["model_params"]
+    with pytest.raises(HTTPException):
+        m.broadcast(m.BroadcastRequest(global_model_params=other))
+    assert m.aggregator.model_version == 1 and m.model_checksum == r["model_checksum"]
+    assert m.evaluate_now()["matches"] is True
+
+
+def test_dataset_file_matches_its_generator():
+    import json
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "eval"))
+    import build_eval_dataset
+    import evaluation
+    with open(evaluation.DATASET_PATH, encoding="utf-8") as f:
+        assert json.load(f) == build_eval_dataset.build()
+    assert evaluation.load_dataset()[0] is not None

@@ -52,8 +52,12 @@ class AnomalyDetector:
         if not self.is_fitted:
             # Return zeros/ones if not fitted to avoid crashing
             return np.ones(len(X_raw)), np.zeros(len(X_raw))
-        X = self.scale(X_raw)
+        return self.predict_scaled(self.scale(X_raw))
 
+    def predict_scaled(self, X: np.ndarray) -> tuple:
+        """Predict on features already scaled with self.scale (rows are scored independently)."""
+        if not self.is_fitted:
+            return np.ones(len(X)), np.zeros(len(X))
         # One model pass: same rule as IsolationForest.predict (score - offset_ < 0 -> anomaly)
         scores = self.model.score_samples(X)
         preds = np.where(scores - self.model.offset_ < 0, -1, 1)
