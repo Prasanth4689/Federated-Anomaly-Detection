@@ -82,6 +82,8 @@ export default function App() {
 
   useEffect(() => {
     if (!backendReady) return;
+    // Wake the ML service now (it also sleeps when idle) so it is up before the simulation starts
+    fetch(`${API_URL}/api/ml/wake`, { method: 'POST' }).catch(() => {});
     fetch(`${API_URL}/api/federated/rounds`)
       .then(r => r.json())
       .then((rounds: any[]) => {
