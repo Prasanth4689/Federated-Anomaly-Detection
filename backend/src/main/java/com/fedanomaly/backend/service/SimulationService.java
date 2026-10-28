@@ -23,6 +23,7 @@ public class SimulationService {
     private final FederatedLearningService fedLearningService;
     private final NetworkFlowRepository flowRepository;
     private final SimpMessagingTemplate messagingTemplate;
+    private final AttackService attackService;
     private int tickCount = 0;
     private volatile String state = "STOPPED"; // RUNNING, PAUSED, STOPPED
     private volatile int speedMultiplier = 1; // 1x, 2x, 4x
@@ -32,54 +33,75 @@ public class SimulationService {
                              TrustService trustService,
                              FederatedLearningService fedLearningService,
                              NetworkFlowRepository flowRepository,
-                             SimpMessagingTemplate messagingTemplate) {
+                             SimpMessagingTemplate messagingTemplate,
+                             AttackService attackService) {
         this.trafficGeneratorService = trafficGeneratorService;
         this.flowService = flowService;
         this.trustService = trustService;
         this.fedLearningService = fedLearningService;
         this.flowRepository = flowRepository;
         this.messagingTemplate = messagingTemplate;
+        this.attackService = attackService;
     }
 
-    public void startSimulation() {
+    // One loop at a time. Lifecycle calls are serialized, and a running tick is never interrupted:
+    // it may be committing a federated round, and cutting it off could leave the ML service on a
+    // version the backend never recorded.
+    public synchronized void startSimulation() {
         if ("RUNNING".equals(state)) return;
         if ("STOPPED".equals(state)) flowService.startNewSimulation();
+        haltLoop(); // a paused loop is already halted; this only guards against leftovers
         state = "RUNNING";
+        startLoop();
+        broadcastState();
+    }
+
+    public synchronized void pauseSimulation() {
+        if (!"RUNNING".equals(state)) return;
+        state = "PAUSED";            // queued ticks see this and do nothing
+        haltLoop();                  // waits for an in-flight tick (and FL round) to finish
+        fedLearningService.persistEvaluation();
+        broadcastState();
+    }
+
+    public synchronized void stopSimulation() {
+        if ("STOPPED".equals(state)) return;
+        state = "STOPPED";
+        haltLoop();
+        attackService.stopAll();     // stopping ends the scenario; attacks do not resume on next Play
+        fedLearningService.persistEvaluation();
+        tickCount = 0;               // simulation clock only; model version and rounds are persisted
+        broadcastState();
+    }
+
+    public synchronized void setSpeed(int multiplier) {
+        this.speedMultiplier = multiplier;
+        if ("RUNNING".equals(state)) {
+            haltLoop();
+            startLoop();
+        }
+        broadcastState();
+    }
+
+    private void startLoop() {
         executorService = Executors.newSingleThreadScheduledExecutor();
         long interval = 500 / speedMultiplier;
         executorService.scheduleAtFixedRate(this::tick, 0, interval, TimeUnit.MILLISECONDS);
-        broadcastState();
     }
 
-    public void pauseSimulation() {
-        if (executorService != null) {
-            executorService.shutdown();
+    /** Stop scheduling ticks and wait for the current one to finish (never interrupts it). */
+    private void haltLoop() {
+        ScheduledExecutorService ex = executorService;
+        executorService = null;
+        if (ex == null) return;
+        ex.shutdown();
+        try {
+            if (!ex.awaitTermination(90, TimeUnit.SECONDS)) {
+                System.err.println("Simulation tick still running after 90s; it will finish on its own");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
-        state = "PAUSED";
-        fedLearningService.persistEvaluation();
-        broadcastState();
-    }
-
-    public void stopSimulation() {
-        if (executorService != null) {
-            executorService.shutdownNow();
-        }
-        state = "STOPPED";
-        fedLearningService.persistEvaluation();
-        tickCount = 0;
-        broadcastState();
-    }
-
-    public void setSpeed(int multiplier) {
-        this.speedMultiplier = multiplier;
-        if ("RUNNING".equals(state)) {
-            // Restart with new speed
-            if (executorService != null) executorService.shutdownNow();
-            executorService = Executors.newSingleThreadScheduledExecutor();
-            long interval = 500 / speedMultiplier;
-            executorService.scheduleAtFixedRate(this::tick, 0, interval, TimeUnit.MILLISECONDS);
-        }
-        broadcastState();
     }
 
     public Map<String, Object> getSimulationState() {
@@ -91,6 +113,7 @@ public class SimulationService {
     }
 
     private void tick() {
+        if (!"RUNNING".equals(state)) return; // paused/stopped while this tick was queued
         try {
             trafficGeneratorService.generateTraffic();
             flowService.processFlows();
@@ -103,12 +126,12 @@ public class SimulationService {
                 cleanOldFlows();
             }
 
-            // Run FedAvg round every 20 ticks (10 seconds at 1x)
-            // Persist the current model's evaluation so a restart does not lose it
+            // Persist the current model's live counts so a restart does not lose them
             if (tickCount % 10 == 0) {
                 fedLearningService.persistEvaluation();
             }
 
+            // Automatic federated round every 20 ticks (10 s at 1x); version/round advance only on success
             if (tickCount % 20 == 0) {
                 fedLearningService.runFederatedRound();
             }
@@ -136,7 +159,8 @@ public class SimulationService {
     }
     
     @PreDestroy
-    public void cleanup() {
+    public synchronized void cleanup() {
+        haltLoop();
         if (executorService != null) {
             executorService.shutdownNow();
         }

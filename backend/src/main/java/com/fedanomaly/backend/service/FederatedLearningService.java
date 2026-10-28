@@ -79,6 +79,8 @@ public class FederatedLearningService {
         Optional<FederatedRound> latest = roundRepository.findTopByOrderByRoundNumberDescIdDesc();
         int version = latest.map(FederatedRound::getRoundNumber).orElse(0);
         m.put("version", version);
+        // Completed (successfully committed) aggregation rounds, from the persisted round records
+        m.put("completedRounds", roundRepository.count());
         m.put("checksum", latest.map(FederatedRound::getModelChecksum).orElse(null));
         m.put("participants", latest.map(FederatedRound::getParticipants).orElse(0));
         m.put("completedAt", latest.map(r -> String.valueOf(r.getCompletedAt())).orElse(null));

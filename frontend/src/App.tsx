@@ -55,7 +55,7 @@ export default function App() {
   const [targetNode, setTargetNode]     = useState('');
   const [activeAttacks, setActiveAttacks] = useState<Record<string, string>>({});
   // Deployed global model and its own evaluation, as recorded by the backend
-  const [modelInfo, setModelInfo] = useState<{ version: number; checksum: string | null; evaluated: boolean;
+  const [modelInfo, setModelInfo] = useState<{ version: number; completedRounds: number; checksum: string | null; evaluated: boolean;
     globalAccuracy: number | null; globalPrecision: number | null; globalRecall: number | null;
     evalDatasetId: string | null; evalDatasetSize: number | null; consistent: boolean | null;
     live: { accuracy: number | null; samples: number; window: string } } | null>(null);
@@ -311,7 +311,7 @@ export default function App() {
           <div className="hidden md:flex items-center gap-4 bg-black/20 border border-soc-border rounded-lg px-4 py-1.5">
             <div className="flex flex-col">
               <span className="text-[9px] text-soc-muted uppercase">Global Model</span>
-              <span className="text-xs font-bold text-cyan-400" title={modelInfo?.checksum ? `model ${modelInfo.checksum}${modelInfo.consistent === false ? ' — ML service reports a different model' : ''}` : undefined}>v{currentRound}.0 (Round #{currentRound}){modelInfo?.consistent === false ? ' ⚠' : ''}</span>
+              <span className="text-xs font-bold text-cyan-400" title={modelInfo?.checksum ? `model ${modelInfo.checksum}${modelInfo.consistent === false ? ' — ML service reports a different model' : ''}` : undefined}>v{currentRound}.0 (Round #{modelInfo?.completedRounds ?? 0}){modelInfo?.consistent === false ? ' ⚠' : ''}</span>
             </div>
             <div className="w-px h-6 bg-soc-border"></div>
             <div className="flex flex-col">
