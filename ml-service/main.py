@@ -148,6 +148,9 @@ class PredictRequest(BaseModel):
     node_id: str
     flow_data: List[Dict[str, Any]]
 
+class PredictBatchRequest(BaseModel):
+    nodes: List[PredictRequest]
+
 class FedAvgRequest(BaseModel):
     client_models: List[Dict[str, Any]]
     weights: List[float]
@@ -174,12 +177,23 @@ def train(req: TrainRequest):
 
 @app.post("/predict")
 def predict(req: PredictRequest):
-    model = local_models.get(req.node_id)
-    if model is None:  # node without its own model yet: start from the global one
-        model = model_for_node(req.node_id)
-        local_models[req.node_id] = model
+    return predict_node(req.node_id, req.flow_data)
 
-    X = extract_features(req.flow_data)
+
+@app.post("/predict_batch")
+def predict_batch(req: PredictBatchRequest):
+    # All nodes of one simulation tick in one request (one HTTP call per tick instead of one per
+    # node, which hosted platforms rate-limit). Each node is still scored by its own model.
+    return {"results": {n.node_id: predict_node(n.node_id, n.flow_data) for n in req.nodes}}
+
+
+def predict_node(node_id: str, flow_data: List[Dict[str, Any]]):
+    model = local_models.get(node_id)
+    if model is None:  # node without its own model yet: start from the global one
+        model = model_for_node(node_id)
+        local_models[node_id] = model
+
+    X = extract_features(flow_data)
 
     if len(X) == 0:
         return {"predictions": [], "model_version": None}
@@ -201,7 +215,7 @@ def predict(req: PredictRequest):
     version = getattr(model, "version", None) if model.is_fitted else None
 
     result = []
-    for i, flow in enumerate(req.flow_data):
+    for i, flow in enumerate(flow_data):
         pred = {
             "flow_id": flow.get("flow_id", str(i)),
             "anomaly_score": float(scores[i]),

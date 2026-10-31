@@ -115,6 +115,8 @@ public class FederatedLearningService {
     public void runFederatedRound() {
         List<NetworkNode> nodes = nodeRepository.findAll();
         if (nodes.isEmpty()) return;
+        // ML host is rate-limiting us: skip this round (nothing is staged or committed) and retry next time
+        if (flowService.mlBackingOff()) return;
 
         // Step 1: Local Training
         List<Map<String, Object>> clientModels = new ArrayList<>();
@@ -170,6 +172,10 @@ public class FederatedLearningService {
                         weights.add(trustFactor * Math.max(0.1, sampleFactor));
                     }
                 }
+            } catch (org.springframework.web.client.HttpClientErrorException.TooManyRequests e) {
+                // Rate-limited mid-round: stop sending, abandon the round (candidates are only staged)
+                flowService.noteRateLimited(e);
+                return;
             } catch (Exception e) {
                 System.err.println("Failed to train node " + node.getId() + ": " + e.getMessage());
             }

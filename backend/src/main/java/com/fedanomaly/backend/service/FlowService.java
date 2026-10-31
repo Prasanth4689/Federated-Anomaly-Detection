@@ -51,6 +51,10 @@ public class FlowService {
     // External hosts blocked at the perimeter firewall after the ML flagged them
     private final Set<String> blockedExternal = ConcurrentHashMap.newKeySet();
     private volatile long lastMlWarningMs = 0;
+    // After a 429 from the ML host, skip ML calls until this time (honours Retry-After, else backs off)
+    private volatile long mlBackoffUntilMs = 0;
+    private volatile long mlBackoffMs = 0;
+    private volatile boolean mlBatchSupported = true;
 
     // Track which nodes generated significant anomalies in the most recent tick
     private final Set<String> activeSuspiciousSources = ConcurrentHashMap.newKeySet();
@@ -163,22 +167,16 @@ public class FlowService {
             nodeFlowObjects.computeIfAbsent(destNode, k -> new ArrayList<>()).add(f);
         }
 
-        // Request predictions from ML service
+        // Request predictions from ML service: one request per tick for all nodes
+        Map<String, Map<String, Object>> mlResults = requestPredictions(nodeFlowsMap);
         for (Map.Entry<String, List<Map<String, Object>>> entry : nodeFlowsMap.entrySet()) {
             String nodeId = entry.getKey();
             List<Map<String, Object>> flowMaps = entry.getValue();
             List<NetworkFlow> nodeFlows = nodeFlowObjects.get(nodeId);
-            
-            Map<String, Object> req = new HashMap<>();
-            req.put("node_id", nodeId);
-            req.put("flow_data", flowMaps);
 
             try {
-                @SuppressWarnings("unchecked")
-                Map<String, Object> response = restTemplate.postForObject(
-                    mlServiceUrl + "/predict", req, Map.class);
-                    
-                if (response != null && response.containsKey("predictions")) {
+                Map<String, Object> response = mlResults.get(nodeId);
+                if (response != null&& response.containsKey("predictions")) {
                     @SuppressWarnings("unchecked")
                     List<Map<String, Object>> preds = (List<Map<String, Object>>) response.get("predictions");
                     Object versionObj = response.get("model_version");
@@ -304,25 +302,88 @@ public class FlowService {
                     }
                 }
             } catch (Exception e) {
-                // ML service down: no detection possible. Say so (rate-limited) instead of failing silently.
-                long now = System.currentTimeMillis();
-                if (now - lastMlWarningMs > 30_000) {
-                    lastMlWarningMs = now;
-                    Map<String, Object> warn = new HashMap<>();
-                    warn.put("type", "ML_SERVICE_UNREACHABLE");
-                    warn.put("timestamp", Instant.now().toString());
-                    warn.put("message", "ML service unreachable at " + mlServiceUrl + " — no anomaly detection: " + e.getMessage());
-                    messagingTemplate.convertAndSend("/topic/events", warn);
-                }
+                System.err.println("Failed to apply predictions for " + nodeId + ": " + e.getMessage());
             }
         }
-        
+
         flowRepository.saveAll(flowsToSave);
         
         // Broadcast flows
         for (NetworkFlow f : flowsToSave) {
             messagingTemplate.convertAndSend("/topic/flows", f);
         }
+    }
+
+    /**
+     * Predictions for every node of this tick, keyed by node id. Empty when the ML service is
+     * unreachable or rate-limiting us (flows are then stored unscored, and the UI is told why).
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Map<String, Object>> requestPredictions(Map<String, List<Map<String, Object>>> nodeFlowsMap) {
+        if (nodeFlowsMap.isEmpty()) return Map.of();
+        long now = System.currentTimeMillis();
+        if (now < mlBackoffUntilMs) return Map.of(); // still backing off after a 429
+        try {
+            Map<String, Map<String, Object>> results = new HashMap<>();
+            if (mlBatchSupported) {
+                List<Map<String, Object>> nodes = new ArrayList<>();
+                nodeFlowsMap.forEach((id, flows) -> nodes.add(Map.of("node_id", id, "flow_data", flows)));
+                try {
+                    Map<String, Object> resp = restTemplate.postForObject(
+                        mlServiceUrl + "/predict_batch", Map.of("nodes", nodes), Map.class);
+                    if (resp != null && resp.get("results") instanceof Map<?, ?> r) {
+                        r.forEach((k, v) -> results.put(String.valueOf(k), (Map<String, Object>) v));
+                    }
+                    mlBackoffMs = 0;
+                    return results;
+                } catch (org.springframework.web.client.HttpClientErrorException.NotFound e) {
+                    mlBatchSupported = false; // older ML service: fall back to one call per node
+                }
+            }
+            for (Map.Entry<String, List<Map<String, Object>>> e : nodeFlowsMap.entrySet()) {
+                Map<String, Object> resp = restTemplate.postForObject(mlServiceUrl + "/predict",
+                    Map.of("node_id", e.getKey(), "flow_data", e.getValue()), Map.class);
+                if (resp != null) results.put(e.getKey(), resp);
+            }
+            mlBackoffMs = 0;
+            return results;
+        } catch (org.springframework.web.client.HttpClientErrorException.TooManyRequests e) {
+            noteRateLimited(e);
+        } catch (Exception e) {
+            warnMl("ML service unreachable at " + mlServiceUrl + " - no anomaly detection: " + e.getMessage());
+        }
+        return Map.of();
+    }
+
+    /** True while ML calls are paused after a 429 (federated rounds wait too). */
+    public boolean mlBackingOff() {
+        return System.currentTimeMillis() < mlBackoffUntilMs;
+    }
+
+    /** The ML host answered 429: pause all ML calls (Retry-After if given, else 5 s doubling to 60 s). */
+    public synchronized void noteRateLimited(org.springframework.web.client.HttpClientErrorException.TooManyRequests e) {
+        long now = System.currentTimeMillis();
+        if (now < mlBackoffUntilMs) return; // already backing off
+        long retryAfterMs = 0;
+        String ra = e.getResponseHeaders() == null ? null : e.getResponseHeaders().getFirst("Retry-After");
+        try { if (ra != null) retryAfterMs = Long.parseLong(ra.trim()) * 1000; } catch (NumberFormatException ignored) { }
+        mlBackoffMs = Math.min(60_000, mlBackoffMs == 0 ? 5_000 : mlBackoffMs * 2);
+        long wait = Math.max(retryAfterMs, mlBackoffMs);
+        mlBackoffUntilMs = now + wait;
+        warnMl("ML service at " + mlServiceUrl + " is rate-limiting requests (429) - detection paused for "
+            + (wait / 1000) + "s, then resumes automatically");
+    }
+
+    /** No detection possible: say so (at most every 30 s) instead of failing silently. */
+    private void warnMl(String message) {
+        long now = System.currentTimeMillis();
+        if (now - lastMlWarningMs <= 30_000) return;
+        lastMlWarningMs = now;
+        Map<String, Object> warn = new HashMap<>();
+        warn.put("type", "ML_SERVICE_UNREACHABLE");
+        warn.put("timestamp", Instant.now().toString());
+        warn.put("message", message);
+        messagingTemplate.convertAndSend("/topic/events", warn);
     }
 
     /** Continue counting for a version from persisted counts (after a backend restart). */
